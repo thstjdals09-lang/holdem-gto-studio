@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { RANKS, SUITS, makeCard, parseCards } from "../engine/cards";
 import { cardLabel, suitClass } from "./format";
 
@@ -90,10 +90,11 @@ export function useHashRoute(): { path: string; params: URLSearchParams; navigat
     window.addEventListener("hashchange", h);
     return () => window.removeEventListener("hashchange", h);
   }, []);
-  const raw = hash.replace(/^#/, "") || "/";
-  const q = raw.indexOf("?");
-  const path = q >= 0 ? raw.slice(0, q) : raw;
-  const params = new URLSearchParams(q >= 0 ? raw.slice(q + 1) : "");
+  const { path, params } = useMemo(() => {
+    const raw = hash.replace(/^#/, "") || "/";
+    const q = raw.indexOf("?");
+    return { path: q >= 0 ? raw.slice(0, q) : raw, params: new URLSearchParams(q >= 0 ? raw.slice(q + 1) : "") };
+  }, [hash]);
   const navigate = (p: string, prm?: Record<string, string>) => {
     const sp = new URLSearchParams(prm ?? {});
     const s = sp.toString();

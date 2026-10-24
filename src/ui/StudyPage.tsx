@@ -24,6 +24,7 @@ export function StudyPage() {
   const [showOpp, setShowOpp] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [readyId, setReadyId] = useState<string | null>(null);
 
   useEffect(() => {
     db.listSpots().then(setSpots);
@@ -46,8 +47,8 @@ export function StudyPage() {
         setLoading(true);
         await solverClient.call({ type: "spot.load", config: s.config, oop: s.oop, ip: s.ip, strategy: s.strategy, iterations: s.iterations });
         store.loadedSpotId = spotId;
-        setLoading(false);
       }
+      if (!cancel) setReadyId(spotId);
     })().catch((e) => setErr(e.message));
     return () => {
       cancel = true;
@@ -56,7 +57,7 @@ export function StudyPage() {
 
   // 노드 뷰
   useEffect(() => {
-    if (!spot || store.loadedSpotId !== spotId) return;
+    if (!spot || readyId !== spotId) return;
     let cancel = false;
     setLoading(true);
     // 히스토리 라벨을 만들기 위해 경로의 각 접두사를 조회
@@ -82,7 +83,7 @@ export function StudyPage() {
     return () => {
       cancel = true;
     };
-  }, [spot, spotId, path, loading === false && store.loadedSpotId]);
+  }, [spot, spotId, path, readyId]);
 
   const go = (p: Step[]) => navigate("/study", { spot: spotId!, path: encodePath(p) });
 
