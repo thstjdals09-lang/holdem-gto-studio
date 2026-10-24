@@ -1,0 +1,541 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { COMBO_CARDS, comboToString } from "../engine/cards";
+import { evaluate, describe } from "../engine/evaluator";
+import { auxClient } from "../worker/client";
+import type { DecisionView, NodeView } from "../worker/protocol";
+import { db, newId, type Drill, type SavedSpot, type TrainerRecord } from "./db";
+import { Board, PlayingCard, Spinner, useHashRoute } from "./common";
+import { actionColors, bb, pct, STREET_LABEL } from "./format";
+import { decodePath, encodePath, store } from "./store";
+
+type Step = { kind: "action"; index: number } | { kind: "card"; card: number };
+
+interface HandState {
+  heroSeat: 0 | 1;
+  heroCombo: number;
+  villainCombo: number;
+  path: Step[];
+  view: NodeView | null;
+  log: Array<{ who: "hero" | "villain" | "deal"; text: string }>;
+  feedback: Feedback | null;
+  finished: boolean;
+  result?: string;
+}
+interface Feedback {
+  chosen: number;
+  chosenLabel: string;
+  bestIdx: number;
+  bestLabel: string;
+  evs: number[];
+  strategy: number[];
+  evLoss: number;
+  evLossPot: number;
+  verdict: "correct" | "inaccuracy" | "blunder";
+  pot: number;
+}
+
+function sampleIndex(weights: ArrayLike<number>, rng = Math.random): number {
+  let total = 0;
+  for (let i = 0; i < weights.length; i++) total += weights[i];
+  if (total <= 0) return -1;
+  let r = rng() * total;
+  for (let i = 0; i < weights.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return i;
+  }
+  return weights.length - 1;
+}
+
+function verdictOf(evLossPot: number, freq: number): Feedback["verdict"] {
+  if (evLossPot <= 0.01 || freq >= 0.3) return "correct";
+  if (evLossPot <= 0.05) return "inaccuracy";
+  return "blunder";
+}
+
+export function TrainerPage() {
+  const { params, navigate } = useHashRoute();
+  const [spots, setSpots] = useState<SavedSpot[]>([]);
+  const [spotId, setSpotId] = useState<string>(params.get("spot") ?? "");
+  const [spot, setSpot] = useState<SavedSpot | null>(null);
+  const [seatPref, setSeatPref] = useState<0 | 1 | 2>(2);
+  const [startPath] = useState<Step[]>(() => decodePath(params.get("path")));
+  const [hand, setHand] = useState<HandState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [records, setRecords] = useState<TrainerRecord[]>([]);
+  const [drills, setDrills] = useState<Drill[]>([]);
+  const [drillName, setDrillName] = useState("");
+  const [activeDrill, setActiveDrill] = useState<Drill | null>(null);
+  const [tab, setTab] = useState<"play" | "stats" | "drills">("play");
+  const autoNext = useRef(false);
+
+  useEffect(() => {
+    db.listSpots().then((s) => {
+      setSpots(s);
+      if (!spotId && s.length > 0) setSpotId(s[0].id);
+    });
+    db.listTrainer().then(setRecords);
+    db.listDrills().then(setDrills);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!spotId) return;
+    db.getSpot(spotId).then(async (s) => {
+      if (!s) return;
+      setSpot(s);
+      setHand(null);
+      if (store.auxSpotId !== spotId) {
+        setBusy(true);
+        try {
+          await auxClient.call({ type: "spot.load", config: s.config, oop: s.oop, ip: s.ip, strategy: s.strategy, iterations: s.iterations });
+          store.auxSpotId = spotId;
+        } catch (e) {
+          setErr(e instanceof Error ? e.message : String(e));
+        } finally {
+          setBusy(false);
+        }
+      }
+    });
+  }, [spotId]);
+
+  const view = (p: Step[]) => auxClient.call<NodeView>({ type: "node.view", path: p });
+
+  async function deal() {
+    if (!spot) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const root = (await view(startPath)) as NodeView;
+      if (root.kind !== "decision") throw new Error("시작 지점이 결정 노드가 아닙니다. 스터디에서 결정 노드를 고르세요.");
+      const heroSeat: 0 | 1 = seatPref === 2 ? (Math.random() < 0.5 ? 0 : 1) : seatPref;
+      // 히어로 콤보: 히어로 레인지(reach) 기준, 빌런: 빌런 reach 기준 & 충돌 없는 것
+      const heroIsActor = root.player === heroSeat;
+      const heroW = root.combos.map((c) => (heroIsActor ? c.weight : c.oppWeight));
+      const hi = sampleIndex(heroW);
+      if (hi < 0) throw new Error("히어로 레인지가 비어 있습니다");
+      const heroCombo = root.combos[hi].combo;
+      const [ha, hb] = COMBO_CARDS[heroCombo];
+      const villW = root.combos.map((c) => {
+        const [a, b] = COMBO_CARDS[c.combo];
+        if (a === ha || a === hb || b === ha || b === hb) return 0;
+        return heroIsActor ? c.oppWeight : c.weight;
+      });
+      const vi = sampleIndex(villW);
+      if (vi < 0) throw new Error("빌런 레인지가 비어 있습니다");
+      const st: HandState = { heroSeat, heroCombo, villainCombo: root.combos[vi].combo, path: startPath.slice(), view: root, log: [], feedback: null, finished: false };
+      await advance(st);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 히어로 차례가 될 때까지 빌런·딜 진행 */
+  async function advance(st: HandState) {
+    let v = st.view ?? (await view(st.path));
+    for (let guard = 0; guard < 30; guard++) {
+      if (v.kind === "decision") {
+        if (v.player === st.heroSeat) break;
+        // 빌런: 자기 콤보의 평균 전략으로 샘플
+        const entry = v.combos.find((c) => c.combo === st.villainCombo);
+        const strat = entry ? entry.strategy : v.actions.map((a) => a.freq);
+        let ai = sampleIndex(strat);
+        if (ai < 0) ai = 0;
+        st.log.push({ who: "villain", text: `${v.player === 0 ? "OOP" : "IP"} ${v.actions[ai].label}` });
+        st.path = [...st.path, { kind: "action", index: ai }];
+        v = await view(st.path);
+        continue;
+      }
+      if (v.kind === "chance") {
+        const [ha, hb] = COMBO_CARDS[st.heroCombo];
+        const [va, vb] = COMBO_CARDS[st.villainCombo];
+        const live = v.liveCards.filter((c) => c !== ha && c !== hb && c !== va && c !== vb);
+        const c = live[Math.floor(Math.random() * live.length)];
+        st.log.push({ who: "deal", text: `${STREET_LABEL[v.street]} ${"23456789TJQKA"[c >> 2]}${"♣♦♥♠"[c & 3]}` });
+        st.path = [...st.path, { kind: "card", card: c }];
+        v = await view(st.path);
+        continue;
+      }
+      // terminal
+      st.finished = true;
+      if (v.type === "fold") {
+        const heroFolded = v.folder === st.heroSeat;
+        st.result = heroFolded ? `폴드. 팟 ${bb(v.pot)}을 빌런이 가져감` : `빌런 폴드. 팟 ${bb(v.pot)} 획득`;
+      } else {
+        const [ha, hb] = COMBO_CARDS[st.heroCombo];
+        const [va, vb] = COMBO_CARDS[st.villainCombo];
+        const sh = evaluate([...v.board, ha, hb]);
+        const sv = evaluate([...v.board, va, vb]);
+        const vs = comboToString(st.villainCombo);
+        st.result = sh > sv ? `쇼다운 승! ${describe(sh)} vs 빌런 ${vs} (${describe(sv)}). 팟 ${bb(v.pot)}` : sh < sv ? `쇼다운 패. ${describe(sh)} vs 빌런 ${vs} (${describe(sv)})` : `무승부 (${describe(sh)}). 빌런 ${vs}`;
+      }
+      break;
+    }
+    st.view = v;
+    setHand({ ...st });
+  }
+
+  async function act(i: number) {
+    if (!hand || !hand.view || hand.view.kind !== "decision" || !spot) return;
+    const v = hand.view as DecisionView;
+    const entry = v.combos.find((c) => c.combo === hand.heroCombo);
+    const evs = entry ? entry.ev : v.actions.map((a) => a.ev);
+    const strategy = entry ? entry.strategy : v.actions.map((a) => a.freq);
+    let bestIdx = 0;
+    for (let k = 1; k < evs.length; k++) if (evs[k] > evs[bestIdx]) bestIdx = k;
+    const evLoss = Math.max(0, evs[bestIdx] - evs[i]);
+    const evLossPot = v.pot > 0 ? evLoss / v.pot : 0;
+    const fb: Feedback = { chosen: i, chosenLabel: v.actions[i].label, bestIdx, bestLabel: v.actions[bestIdx].label, evs, strategy, evLoss, evLossPot, verdict: verdictOf(evLossPot, strategy[i]), pot: v.pot };
+    const rec: TrainerRecord = {
+      id: newId(),
+      at: Date.now(),
+      spotId: spot.id,
+      spotName: spot.name,
+      heroSeat: hand.heroSeat,
+      street: v.street,
+      heroCombo: hand.heroCombo,
+      chosen: v.actions[i].label,
+      best: v.actions[bestIdx].label,
+      evLoss,
+      evLossPot: evLossPot * 100,
+      verdict: fb.verdict,
+      gtoFreq: strategy[i]
+    };
+    await db.putTrainer(rec);
+    setRecords((r) => [rec, ...r]);
+    if (activeDrill) {
+      const d = { ...activeDrill, handsPlayed: activeDrill.handsPlayed + 1, correct: activeDrill.correct + (fb.verdict === "correct" ? 1 : 0), inaccuracy: activeDrill.inaccuracy + (fb.verdict === "inaccuracy" ? 1 : 0), blunder: activeDrill.blunder + (fb.verdict === "blunder" ? 1 : 0), evLossSum: activeDrill.evLossSum + evLossPot * 100 };
+      setActiveDrill(d);
+      await db.putDrill(d);
+      setDrills(await db.listDrills());
+    }
+    const st: HandState = { ...hand, feedback: fb, log: [...hand.log, { who: "hero", text: `${hand.heroSeat === 0 ? "OOP" : "IP"} ${v.actions[i].label}` }], path: [...hand.path, { kind: "action", index: i }], view: null };
+    setBusy(true);
+    try {
+      await advance(st);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const stats = useMemo(() => {
+    const n = records.length;
+    const correct = records.filter((r) => r.verdict === "correct").length;
+    const inacc = records.filter((r) => r.verdict === "inaccuracy").length;
+    const blunder = records.filter((r) => r.verdict === "blunder").length;
+    const evLoss = records.reduce((a, r) => a + r.evLossPot, 0) / Math.max(1, n);
+    const byStreet: Record<number, { n: number; c: number; ev: number }> = {};
+    const bySeat: Record<number, { n: number; c: number; ev: number }> = {};
+    for (const r of records) {
+      const s = (byStreet[r.street] ??= { n: 0, c: 0, ev: 0 });
+      s.n++;
+      s.c += r.verdict === "correct" ? 1 : 0;
+      s.ev += r.evLossPot;
+      const t = (bySeat[r.heroSeat] ??= { n: 0, c: 0, ev: 0 });
+      t.n++;
+      t.c += r.verdict === "correct" ? 1 : 0;
+      t.ev += r.evLossPot;
+    }
+    return { n, correct, inacc, blunder, evLoss, byStreet, bySeat };
+  }, [records]);
+
+  useEffect(() => {
+    if (hand?.finished && autoNext.current) {
+      const t = setTimeout(() => deal(), 1800);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hand?.finished]);
+
+  const dv = hand?.view && hand.view.kind === "decision" ? (hand.view as DecisionView) : null;
+  const colors = dv ? actionColors(dv.actions) : [];
+  const heroCards = hand ? COMBO_CARDS[hand.heroCombo] : null;
+
+  return (
+    <div className="page">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>트레이너 <span className="muted" style={{ fontSize: 13 }}>GTO 상대와 플레이</span></h2>
+        <div className="tabs" style={{ margin: 0, borderBottom: "none" }}>
+          {(["play", "stats", "drills"] as const).map((t) => (
+            <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
+              {t === "play" ? "플레이" : t === "stats" ? "통계" : "드릴"}
+            </button>
+          ))}
+        </div>
+      </div>
+      {err && <div className="error">{err}</div>}
+      {tab === "play" && (
+        <div className="grid2" style={{ marginTop: 10 }}>
+          <div className="col">
+            <div className="card row">
+              <label className="col" style={{ fontSize: 12 }}>
+                스팟
+                <select value={spotId} onChange={(e) => { setSpotId(e.target.value); setActiveDrill(null); }}>
+                  {spots.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="col" style={{ fontSize: 12 }}>
+                내 자리
+                <select value={seatPref} onChange={(e) => setSeatPref(Number(e.target.value) as 0 | 1 | 2)}>
+                  <option value={2}>무작위</option>
+                  <option value={0}>OOP</option>
+                  <option value={1}>IP</option>
+                </select>
+              </label>
+              <label className="row" style={{ fontSize: 12 }}>
+                <input type="checkbox" onChange={(e) => (autoNext.current = e.target.checked)} /> 자동 다음 핸드
+              </label>
+              <button className="primary" disabled={!spot || busy} onClick={deal}>
+                {hand ? "다음 핸드" : "핸드 시작"}
+              </button>
+              {startPath.length > 0 && <span className="badge">스터디 지점에서 시작 ({startPath.length}단계)</span>}
+              {activeDrill && <span className="badge ok">드릴: {activeDrill.name}</span>}
+            </div>
+            {spots.length === 0 && (
+              <div className="card muted">
+                솔브된 스팟이 없습니다. <a href="#/solve">커스텀 솔브</a>에서 먼저 만드세요.
+              </div>
+            )}
+            {hand && (
+              <div className="card col">
+                <div className="table-felt">
+                  <div className="seat">
+                    <span className="name">빌런 ({hand.heroSeat === 0 ? "IP" : "OOP"})</span>
+                    <span>
+                      {hand.finished ? (
+                        <>
+                          <PlayingCard card={COMBO_CARDS[hand.villainCombo][0]} size="sm" />
+                          <PlayingCard card={COMBO_CARDS[hand.villainCombo][1]} size="sm" />
+                        </>
+                      ) : (
+                        <>
+                          <span className="pcard ghost sm">?</span>
+                          <span className="pcard ghost sm">?</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  <div className="col" style={{ alignItems: "center" }}>
+                    <Board cards={hand.view?.board ?? spot?.config.board ?? []} />
+                    <div style={{ fontWeight: 700 }}>팟 {bb(hand.view?.pot ?? 0)} bb</div>
+                  </div>
+                  <div className="seat hero-hand">
+                    <span>
+                      {heroCards && (
+                        <>
+                          <PlayingCard card={heroCards[0]} />
+                          <PlayingCard card={heroCards[1]} />
+                        </>
+                      )}
+                    </span>
+                    <span className="name">나 ({hand.heroSeat === 0 ? "OOP" : "IP"})</span>
+                  </div>
+                </div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {hand.log.map((l, i) => (
+                    <span key={i}>
+                      {i > 0 && " → "}
+                      <span style={{ color: l.who === "hero" ? "var(--accent)" : l.who === "deal" ? "#93c5fd" : undefined }}>{l.text}</span>
+                    </span>
+                  ))}
+                </div>
+                {dv && !hand.finished && (
+                  <div className="col">
+                    <h3>
+                      {STREET_LABEL[dv.street]} · 내 차례 {dv.toCall > 0 && <span className="muted">(콜 {bb(dv.toCall)})</span>}
+                    </h3>
+                    <div className="row">
+                      {dv.actions.map((a, i) => (
+                        <button key={i} className="primary" style={{ background: colors[i], color: "#fff" }} disabled={busy} onClick={() => act(i)}>
+                          {a.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {hand.finished && <div className="card" style={{ background: "var(--bg3)" }}>{hand.result}</div>}
+                {busy && <Spinner />}
+              </div>
+            )}
+          </div>
+          <div className="col">
+            {hand?.feedback && <FeedbackCard fb={hand.feedback} colors={actionColors(hand.feedback.evs.map((_, i) => ({ type: i === 0 ? "fold" : "bet" })))} spotId={spotId} path={hand.path.slice(0, -1)} navigate={navigate} />}
+            {!hand?.feedback && (
+              <div className="card muted">
+                <h3>채점 기준</h3>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  <li><b style={{ color: "var(--accent)" }}>정확</b>: EV 손실 ≤ 팟의 1% 또는 GTO 빈도 ≥ 30%</li>
+                  <li><b style={{ color: "var(--warn)" }}>부정확</b>: EV 손실 ≤ 팟의 5%</li>
+                  <li><b style={{ color: "var(--danger)" }}>블런더</b>: EV 손실 &gt; 팟의 5%</li>
+                </ul>
+                <p style={{ marginBottom: 0 }}>빌런은 솔브된 평균 전략으로 자기 핸드에 맞게 혼합 플레이합니다. 턴·리버 카드는 양쪽 핸드와 겹치지 않게 무작위로 나옵니다.</p>
+              </div>
+            )}
+            <div className="card">
+              <h3>세션 요약</h3>
+              <div className="tiles">
+                <div className="tile">
+                  <div className="v">{stats.n}</div>
+                  <div className="k">결정 수</div>
+                </div>
+                <div className="tile">
+                  <div className="v">{stats.n ? pct(stats.correct / stats.n, 0) : "-"}</div>
+                  <div className="k">정확도</div>
+                </div>
+                <div className="tile">
+                  <div className="v">{stats.n ? stats.evLoss.toFixed(2) + "%" : "-"}</div>
+                  <div className="k">평균 EV 손실 (팟 %)</div>
+                </div>
+                <div className="tile">
+                  <div className="v" style={{ color: "var(--danger)" }}>{stats.blunder}</div>
+                  <div className="k">블런더</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {tab === "stats" && (
+        <div className="col" style={{ marginTop: 10 }}>
+          <div className="card">
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <h3>전체 통계 ({stats.n}결정)</h3>
+              <button className="danger" onClick={async () => { if (confirm("트레이너 기록을 모두 지울까요?")) { await db.clearTrainer(); setRecords([]); } }}>기록 초기화</button>
+            </div>
+            <div className="tiles">
+              <div className="tile"><div className="v">{stats.n ? pct(stats.correct / stats.n, 0) : "-"}</div><div className="k">정확</div></div>
+              <div className="tile"><div className="v">{stats.n ? pct(stats.inacc / stats.n, 0) : "-"}</div><div className="k">부정확</div></div>
+              <div className="tile"><div className="v">{stats.n ? pct(stats.blunder / stats.n, 0) : "-"}</div><div className="k">블런더</div></div>
+              <div className="tile"><div className="v">{stats.n ? stats.evLoss.toFixed(2) + "%" : "-"}</div><div className="k">평균 EV 손실/결정 (팟 %)</div></div>
+            </div>
+            <div className="grid2" style={{ marginTop: 10 }}>
+              <table className="tbl">
+                <thead><tr><th>스트리트</th><th>결정</th><th>정확도</th><th>평균 EV 손실</th></tr></thead>
+                <tbody>
+                  {Object.entries(stats.byStreet).map(([s, v]) => (
+                    <tr key={s}><td>{STREET_LABEL[Number(s)]}</td><td>{v.n}</td><td>{pct(v.c / v.n, 0)}</td><td>{(v.ev / v.n).toFixed(2)}%</td></tr>
+                  ))}
+                </tbody>
+              </table>
+              <table className="tbl">
+                <thead><tr><th>자리</th><th>결정</th><th>정확도</th><th>평균 EV 손실</th></tr></thead>
+                <tbody>
+                  {Object.entries(stats.bySeat).map(([s, v]) => (
+                    <tr key={s}><td>{Number(s) === 0 ? "OOP" : "IP"}</td><td>{v.n}</td><td>{pct(v.c / v.n, 0)}</td><td>{(v.ev / v.n).toFixed(2)}%</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="card">
+            <h3>최근 결정</h3>
+            <table className="tbl">
+              <thead><tr><th>시각</th><th>스팟</th><th>자리</th><th>스트리트</th><th>핸드</th><th>선택</th><th>최선</th><th>GTO 빈도</th><th>EV 손실</th><th>판정</th></tr></thead>
+              <tbody>
+                {records.slice(0, 50).map((r) => (
+                  <tr key={r.id}>
+                    <td className="muted">{new Date(r.at).toLocaleTimeString()}</td>
+                    <td>{r.spotName}</td>
+                    <td>{r.heroSeat === 0 ? "OOP" : "IP"}</td>
+                    <td>{STREET_LABEL[r.street]}</td>
+                    <td>{comboToString(r.heroCombo)}</td>
+                    <td>{r.chosen}</td>
+                    <td>{r.best}</td>
+                    <td>{pct(r.gtoFreq, 0)}</td>
+                    <td>{r.evLossPot.toFixed(1)}%</td>
+                    <td className={`verdict ${r.verdict}`} style={{ fontSize: 13 }}>{r.verdict === "correct" ? "정확" : r.verdict === "inaccuracy" ? "부정확" : "블런더"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {tab === "drills" && (
+        <div className="col" style={{ marginTop: 10 }}>
+          <div className="card row">
+            <input placeholder="드릴 이름 (예: K72r BTN vs BB 플랍)" value={drillName} onChange={(e) => setDrillName(e.target.value)} style={{ width: 280 }} />
+            <button
+              className="primary"
+              disabled={!spot || drillName.trim().length < 2}
+              onClick={async () => {
+                const d: Drill = { id: newId(), name: drillName.trim(), spotId: spot!.id, heroSeat: seatPref, startPath, createdAt: Date.now(), handsPlayed: 0, correct: 0, inaccuracy: 0, blunder: 0, evLossSum: 0 };
+                await db.putDrill(d);
+                setDrills(await db.listDrills());
+                setDrillName("");
+                setActiveDrill(d);
+                setTab("play");
+              }}
+            >
+              현재 설정을 드릴로 저장
+            </button>
+            <span className="muted" style={{ fontSize: 12 }}>드릴 = 스팟 + 자리 + 시작 지점. 저장하면 결과가 드릴별로 집계됩니다.</span>
+          </div>
+          <div className="card">
+            <table className="tbl">
+              <thead><tr><th>이름</th><th>스팟</th><th>자리</th><th>시작</th><th>핸드</th><th>정확도</th><th>평균 EV 손실</th><th></th></tr></thead>
+              <tbody>
+                {drills.map((d) => (
+                  <tr key={d.id}>
+                    <td>{d.name}</td>
+                    <td>{spots.find((s) => s.id === d.spotId)?.name ?? "(삭제됨)"}</td>
+                    <td>{d.heroSeat === 2 ? "무작위" : d.heroSeat === 0 ? "OOP" : "IP"}</td>
+                    <td>{d.startPath.length === 0 ? "루트" : `${d.startPath.length}단계`}</td>
+                    <td>{d.handsPlayed}</td>
+                    <td>{d.handsPlayed ? pct(d.correct / d.handsPlayed, 0) : "-"}</td>
+                    <td>{d.handsPlayed ? (d.evLossSum / d.handsPlayed).toFixed(2) + "%" : "-"}</td>
+                    <td className="row">
+                      <button onClick={() => { setActiveDrill(d); setSpotId(d.spotId); setSeatPref(d.heroSeat); navigate("/trainer", { spot: d.spotId, path: encodePath(d.startPath) }); setTab("play"); }}>시작</button>
+                      <button className="danger" onClick={async () => { await db.deleteDrill(d.id); setDrills(await db.listDrills()); }}>삭제</button>
+                    </td>
+                  </tr>
+                ))}
+                {drills.length === 0 && <tr><td colSpan={8} className="muted">저장된 드릴이 없습니다.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeedbackCard({ fb, spotId, path, navigate }: { fb: Feedback; colors: string[]; spotId: string; path: Step[]; navigate: (p: string, q?: Record<string, string>) => void }) {
+  const labelOf = (v: Feedback["verdict"]) => (v === "correct" ? "정확!" : v === "inaccuracy" ? "부정확" : "블런더");
+  return (
+    <div className="card col">
+      <div className={`verdict ${fb.verdict}`}>{labelOf(fb.verdict)}</div>
+      <div>
+        선택: <b>{fb.chosenLabel}</b> (GTO 빈도 {pct(fb.strategy[fb.chosen], 0)}) · 최선: <b>{fb.bestLabel}</b>
+      </div>
+      <div>
+        EV 손실 <b>{bb(fb.evLoss)} bb</b> = 팟의 {(fb.evLossPot * 100).toFixed(1)}%
+      </div>
+      <table className="tbl">
+        <thead>
+          <tr>
+            <th>액션</th>
+            <th>GTO 빈도</th>
+            <th>EV</th>
+          </tr>
+        </thead>
+        <tbody>
+          {fb.evs.map((e, i) => (
+            <tr key={i} style={{ fontWeight: i === fb.bestIdx ? 700 : 400 }}>
+              <td>{i === fb.chosen ? "▶ " : ""}{i === fb.bestIdx ? "★ " : ""}액션 {i + 1}</td>
+              <td>{pct(fb.strategy[i], 0)}</td>
+              <td>{bb(e)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button onClick={() => navigate("/study", { spot: spotId, path: encodePath(path) })}>이 스팟 스터디에서 보기 →</button>
+    </div>
+  );
+}
