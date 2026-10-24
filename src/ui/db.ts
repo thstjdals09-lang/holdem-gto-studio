@@ -1,20 +1,23 @@
 // IndexedDB 저장: 솔브된 스팟, 프리플랍 에퀴티 행렬, 드릴, 트레이너 기록
 import type { TreeConfig } from "../engine/tree";
+import type { MultiTreeConfig } from "../engine/multi";
 
 export interface SavedSpot {
   id: string;
   name: string;
   createdAt: number;
-  config: TreeConfig;
-  oopText: string;
-  ipText: string;
-  oop: Float32Array;
-  ip: Float32Array;
+  players: number;
+  config?: TreeConfig; // players === 2
+  mconfig?: MultiTreeConfig; // players > 2
+  rangeTexts: string[];
+  ranges: Float32Array[];
   strategy: Float32Array;
   iterations: number;
   exploitabilityPct: number;
-  evOop: number;
-  evIp: number;
+  ev: number[];
+  board: number[];
+  pot: number;
+  effStack: number;
   tags?: string[];
 }
 
@@ -22,7 +25,7 @@ export interface Drill {
   id: string;
   name: string;
   spotId: string;
-  heroSeat: 0 | 1 | 2; // 2 = 무작위
+  heroSeat: number; // -1 = 무작위
   startPath: Array<{ kind: "action"; index: number } | { kind: "card"; card: number }>;
   createdAt: number;
   handsPlayed: number;
@@ -37,7 +40,8 @@ export interface TrainerRecord {
   at: number;
   spotId: string;
   spotName: string;
-  heroSeat: 0 | 1;
+  heroSeat: number;
+  seatLabel: string;
   street: number;
   heroCombo: number;
   chosen: string;
@@ -49,7 +53,7 @@ export interface TrainerRecord {
 }
 
 const DB_NAME = "holdem-gto-studio";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -78,13 +82,42 @@ function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) 
   );
 }
 
+/** 구버전(HU 전용) 스팟 레코드를 현재 형식으로 변환 */
+function migrate(raw: any): SavedSpot | null {
+  if (!raw) return null;
+  if (raw.players && raw.ranges) return raw as SavedSpot;
+  if (raw.config && raw.oop && raw.ip) {
+    return {
+      id: raw.id,
+      name: raw.name,
+      createdAt: raw.createdAt,
+      players: 2,
+      config: raw.config,
+      rangeTexts: [raw.oopText, raw.ipText],
+      ranges: [raw.oop, raw.ip],
+      strategy: raw.strategy,
+      iterations: raw.iterations,
+      exploitabilityPct: raw.exploitabilityPct,
+      ev: [raw.evOop, raw.evIp],
+      board: raw.config.board,
+      pot: raw.config.pot,
+      effStack: raw.config.effStack
+    };
+  }
+  return null;
+}
+
 export const db = {
   async listSpots(): Promise<SavedSpot[]> {
-    const all = await tx<SavedSpot[]>("spots", "readonly", (s) => s.getAll());
-    return all.sort((a, b) => b.createdAt - a.createdAt);
+    const all = await tx<any[]>("spots", "readonly", (s) => s.getAll());
+    return all
+      .map(migrate)
+      .filter((s): s is SavedSpot => !!s)
+      .sort((a, b) => b.createdAt - a.createdAt);
   },
-  getSpot(id: string): Promise<SavedSpot | undefined> {
-    return tx("spots", "readonly", (s) => s.get(id));
+  async getSpot(id: string): Promise<SavedSpot | undefined> {
+    const raw = await tx<any>("spots", "readonly", (s) => s.get(id));
+    return migrate(raw) ?? undefined;
   },
   putSpot(spot: SavedSpot): Promise<unknown> {
     return tx("spots", "readwrite", (s) => s.put(spot));
@@ -122,4 +155,8 @@ export const db = {
 
 export function newId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+export function spotInput(s: SavedSpot) {
+  return { players: s.players, config: s.config, mconfig: s.mconfig, ranges: s.ranges };
 }

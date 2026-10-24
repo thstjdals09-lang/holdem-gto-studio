@@ -67,7 +67,7 @@ function HomePage() {
       <div className="feature-cards">
         <div className="card" onClick={() => go("/solve")}>
           <h3>커스텀 솔브</h3>
-          <p>플랍·턴·리버 시작, 스트리트별 벳/레이즈 사이즈, 레이크, 올인 임계값, 동크 설정. 트리 크기와 메모리를 먼저 추정하고 빠름/표준/깊음 프리셋으로 멈춥니다.</p>
+          <p>2~6인, 플랍·턴·리버 시작, 스트리트별 벳/레이즈 사이즈, 레이크, 올인 임계값, 동크 설정. 트리 크기와 메모리를 먼저 추정하고 빠름/표준/깊음 프리셋으로 멈춥니다.</p>
         </div>
         <div className="card" onClick={() => go("/study")}>
           <h3>스터디</h3>
@@ -93,7 +93,7 @@ function HomePage() {
       <div className="card" style={{ marginTop: 14 }}>
         <h3>엔진</h3>
         <ul style={{ margin: 0, paddingLeft: 18 }} className="muted">
-          <li>헤즈업 포스트플랍 Discounted CFR(α=1.5, β=0, γ=2), 교대 업데이트, 1326 콤보 벡터화, 카드 제거를 정확히 반영한 쇼다운 스윕</li>
+          <li>2~6인 포스트플랍 Discounted CFR(α=1.5, β=0, γ=2), 교대 업데이트, 1326 콤보 벡터화. 3인까지는 상대 두 명의 카드 충돌을 포함-배제로 정확히 계산, 4인 이상은 상대 간 겹침을 무시하는 근사</li>
           <li>익스플로잇어빌리티 = 양쪽 최적 응답 이득의 평균(팟 %). 리버 clairvoyance 이론값(블러프 1/3, MDF 50%) 검증 통과</li>
           <li>모든 계산은 Web Worker에서 실행, 결과는 이 기기의 IndexedDB에만 저장</li>
         </ul>

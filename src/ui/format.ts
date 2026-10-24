@@ -72,3 +72,23 @@ export function heatColor(v: number, lo: number, hi: number): string {
 
 export const STREET_LABEL: Record<number, string> = { 1: "플랍", 2: "턴", 3: "리버" };
 export const SEAT_LABEL = ["OOP", "IP"];
+
+/** 포스트플랍 액션 순서대로 자리 이름 */
+export function seatLabels(players: number): string[] {
+  switch (players) {
+    case 2:
+      return ["OOP", "IP"];
+    case 3:
+      return ["SB", "BB", "BTN"];
+    case 4:
+      return ["SB", "BB", "CO", "BTN"];
+    case 5:
+      return ["SB", "BB", "HJ", "CO", "BTN"];
+    default:
+      return ["SB", "BB", "UTG", "HJ", "CO", "BTN"].slice(0, players);
+  }
+}
+export const SEAT_COLORS = ["#60a5fa", "#fb923c", "#a78bfa", "#f472b6", "#34d399", "#fbbf24"];
+export function seatLabel(players: number, p: number): string {
+  return seatLabels(players)[p] ?? `P${p + 1}`;
+}

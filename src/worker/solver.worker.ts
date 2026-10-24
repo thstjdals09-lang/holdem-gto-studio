@@ -1,13 +1,15 @@
 /// <reference lib="webworker" />
 import { CLASS_COMBOS, COMBO_CLASS, NUM_CLASSES } from "../engine/cards";
-import { buildTree, estimateTree, type DecisionNode, type GameTree, type TreeConfig } from "../engine/tree";
-import { PostflopSolver, type PathStep } from "../engine/solver";
+import { buildTree, estimateTree, type DecisionNode, type GameTree } from "../engine/tree";
+import { PostflopSolver, type Ctx } from "../engine/solver";
+import { buildMultiTree, estimateMultiTree, MultiSolver, type MCtx, type MDecision, type MultiTree } from "../engine/multi";
 import { rangeVsRange, handVsHand } from "../engine/equity";
 import { buildEquityMatrix, buildNonConflict, buildPreflopTree, PreflopSolver, type PfDecision } from "../engine/preflop";
-import type { ActionView, DecisionView, Envelope, EstimateResult, NodeView, PfView, Req, Res } from "./protocol";
+import type { ActionView, DecisionView, Envelope, EstimateResult, NodeView, PathStep, PfView, Req, Res, SpotInput } from "./protocol";
 
-let solver: PostflopSolver | null = null;
-let tree: GameTree | null = null;
+// 현재 로드된 스팟 (HU 또는 멀티)
+let hu: { tree: GameTree; solver: PostflopSolver } | null = null;
+let mu: { tree: MultiTree; solver: MultiSolver } | null = null;
 let stopRequested = false;
 let pfSolver: PreflopSolver | null = null;
 let nonConflict: Float32Array | null = null;
@@ -15,24 +17,53 @@ let nonConflict: Float32Array | null = null;
 function post(id: number, payload: Res, transfer?: Transferable[]) {
   (self as unknown as Worker).postMessage({ id, payload } satisfies Envelope<Res>, transfer ?? []);
 }
+const yieldToQueue = () => new Promise((r) => setTimeout(r, 0));
 
-async function yieldToQueue() {
-  await new Promise((r) => setTimeout(r, 0));
+function metrics() {
+  if (hu) {
+    const m = hu.solver.metrics();
+    return { iterations: m.iterations, exploitabilityPct: m.exploitabilityPct, elapsedMs: m.elapsedMs, ev: [m.evOop, m.evIp], evOop: m.evOop, evIp: m.evIp };
+  }
+  if (mu) {
+    const m = mu.solver.metrics();
+    return { iterations: m.iterations, exploitabilityPct: m.exploitabilityPct, elapsedMs: m.elapsedMs, ev: m.ev, evOop: m.ev[0], evIp: m.ev[1] };
+  }
+  throw new Error("로드된 스팟이 없습니다");
+}
+function iterationCount() {
+  return hu ? hu.solver.iterationCount : mu ? mu.solver.iterationCount : 0;
+}
+function step(n: number) {
+  if (hu) hu.solver.step(n);
+  else if (mu) mu.solver.step(n);
+}
+
+function loadSpot(input: SpotInput) {
+  hu = null;
+  mu = null;
+  if (input.players === 2) {
+    if (!input.config) throw new Error("HU 설정이 없습니다");
+    const tree = buildTree(input.config);
+    hu = { tree, solver: new PostflopSolver(tree, input.ranges[0], input.ranges[1]) };
+  } else {
+    if (!input.mconfig) throw new Error("멀티웨이 설정이 없습니다");
+    const tree = buildMultiTree(input.mconfig);
+    mu = { tree, solver: new MultiSolver(tree, input.ranges) };
+  }
 }
 
 async function runSolve(id: number, targetExploitPct: number, maxIters: number, maxMs: number, batch: number) {
-  if (!solver) throw new Error("솔버가 준비되지 않았습니다");
   stopRequested = false;
   const start = performance.now();
   let reason = "완료";
-  let m = solver.metrics();
+  let m = metrics();
   post(id, { type: "progress", data: { ...m, done: false } });
   while (true) {
     if (stopRequested) {
       reason = "사용자 중단";
       break;
     }
-    if (solver.iterationCount >= maxIters) {
+    if (iterationCount() >= maxIters) {
       reason = "최대 반복 도달";
       break;
     }
@@ -40,9 +71,8 @@ async function runSolve(id: number, targetExploitPct: number, maxIters: number, 
       reason = "시간 예산 도달";
       break;
     }
-    const n = Math.min(batch, maxIters - solver.iterationCount);
-    solver.step(n);
-    m = solver.metrics();
+    step(Math.min(batch, maxIters - iterationCount()));
+    m = metrics();
     post(id, { type: "progress", data: { ...m, done: false } });
     if (m.exploitabilityPct <= targetExploitPct) {
       reason = "목표 정확도 도달";
@@ -54,151 +84,161 @@ async function runSolve(id: number, targetExploitPct: number, maxIters: number, 
   post(id, { type: "result", data: { ...m, reason } });
 }
 
-function viewDecision(d: DecisionNode, ctx: ReturnType<PostflopSolver["walk"]>["ctx"], reach: [Float32Array, Float32Array]): DecisionView {
-  const s = solver!;
-  const an = s.analyzeDecision(d, ctx, reach);
-  const n = s.hands.n;
-  const A = d.actions.length;
+interface ViewSource {
+  n: number;
+  combo: Int32Array;
+  A: number;
+  strategy: Float32Array;
+  ev: Float32Array;
+  handEv: Float32Array;
+  equity: Float32Array;
+  eqr?: Float32Array;
+  M: Float32Array; // 상대 조합 질량 (가중치용)
+  reach: Float32Array[];
+}
+
+function buildDecisionView(src: ViewSource, meta: Omit<DecisionView, "classFreq" | "classEv" | "classWeightNorm" | "seatWeightNorm" | "classEquity" | "classEqr" | "classHandEv" | "combos" | "rangeEv" | "rangeEquity" | "kind">, rangeEv: number, rangeEquity: number): DecisionView {
+  const { n, combo, A, strategy, ev, handEv, equity, M, reach } = src;
+  const P = reach.length;
+  const p = meta.player;
+  const rP = reach[p];
   const classFreq = new Float32Array(NUM_CLASSES * A);
   const classEv = new Float32Array(NUM_CLASSES * A);
-  const classWeight = new Float32Array(NUM_CLASSES);
-  const oppClassWeight = new Float32Array(NUM_CLASSES);
+  const classWsum = new Float32Array(NUM_CLASSES);
   const classEquity = new Float32Array(NUM_CLASSES);
   const classEqr = new Float32Array(NUM_CLASSES);
   const classHandEv = new Float32Array(NUM_CLASSES);
-  const oppEqAcc = new Float32Array(NUM_CLASSES);
+  const seatW: Float32Array[] = Array.from({ length: P }, () => new Float32Array(NUM_CLASSES));
   const combos: DecisionView["combos"] = [];
-  // 상대 에퀴티 (상대 reach 기준, 행동 플레이어 reach에 대한)
-  const oppEquity = s.equityVector(ctx, an.reachP);
   for (let h = 0; h < n; h++) {
-    const combo = s.hands.combo[h];
-    const cls = COMBO_CLASS[combo];
-    const w = an.reachP[h] * an.S[h];
-    const wo = an.reachO[h];
-    if (an.reachP[h] > 0) {
-      classWeight[cls] += an.reachP[h];
-      for (let a = 0; a < A; a++) {
-        classFreq[cls * A + a] += w * an.strategy[a * n + h];
-        classEv[cls * A + a] += w * an.ev[a * n + h];
+    const c = combo[h];
+    const cls = COMBO_CLASS[c];
+    let any = false;
+    const weights: number[] = [];
+    for (let q = 0; q < P; q++) {
+      const v = reach[q][h];
+      weights.push(v);
+      if (v > 0) {
+        any = true;
+        seatW[q][cls] += v;
       }
-      classEquity[cls] += w * an.equity[h];
-      classEqr[cls] += w * an.eqr[h];
-      classHandEv[cls] += w * an.handEv[h];
     }
-    if (wo > 0) {
-      oppClassWeight[cls] += wo;
-      oppEqAcc[cls] += wo * oppEquity[h];
-    }
-    if (an.reachP[h] > 0 || wo > 0) {
-      const strategy: number[] = [];
-      const ev: number[] = [];
+    if (rP[h] > 0) {
+      const w = rP[h] * M[h];
+      classWsum[cls] += w;
       for (let a = 0; a < A; a++) {
-        strategy.push(an.strategy[a * n + h]);
-        ev.push(an.ev[a * n + h]);
+        classFreq[cls * A + a] += w * strategy[a * n + h];
+        classEv[cls * A + a] += w * ev[a * n + h];
       }
-      combos.push({ combo, weight: an.reachP[h], oppWeight: wo, strategy, ev, equity: an.equity[h], eqr: an.eqr[h], handEv: an.handEv[h] });
+      classEquity[cls] += w * equity[h];
+      classEqr[cls] += w * (src.eqr ? src.eqr[h] : 0);
+      classHandEv[cls] += w * handEv[h];
+    }
+    if (any) {
+      const st: number[] = [];
+      const ea: number[] = [];
+      for (let a = 0; a < A; a++) {
+        st.push(strategy[a * n + h]);
+        ea.push(ev[a * n + h]);
+      }
+      combos.push({ combo: c, weight: rP[h], weights, strategy: st, ev: ea, equity: equity[h], eqr: src.eqr ? src.eqr[h] : 0, handEv: handEv[h] });
     }
   }
-  // 정규화
-  const classWsum = new Float32Array(NUM_CLASSES);
-  for (let h = 0; h < n; h++) {
-    if (an.reachP[h] <= 0) continue;
-    classWsum[COMBO_CLASS[s.hands.combo[h]]] += an.reachP[h] * an.S[h];
-  }
-  for (let c = 0; c < NUM_CLASSES; c++) {
-    const ws = classWsum[c];
+  for (let cls = 0; cls < NUM_CLASSES; cls++) {
+    const ws = classWsum[cls];
     if (ws > 0) {
       for (let a = 0; a < A; a++) {
-        classFreq[c * A + a] /= ws;
-        classEv[c * A + a] /= ws;
+        classFreq[cls * A + a] /= ws;
+        classEv[cls * A + a] /= ws;
       }
-      classEquity[c] /= ws;
-      classEqr[c] /= ws;
-      classHandEv[c] /= ws;
+      classEquity[cls] /= ws;
+      classEqr[cls] /= ws;
+      classHandEv[cls] /= ws;
     }
+    for (let q = 0; q < P; q++) seatW[q][cls] /= CLASS_COMBOS[cls].length;
   }
-  const classWeightNorm = new Float32Array(NUM_CLASSES);
-  const oppClassWeightNorm = new Float32Array(NUM_CLASSES);
-  let oppEqNum = 0;
-  let oppEqDen = 0;
-  for (let c = 0; c < NUM_CLASSES; c++) {
-    classWeightNorm[c] = classWeight[c] / CLASS_COMBOS[c].length;
-    oppClassWeightNorm[c] = oppClassWeight[c] / CLASS_COMBOS[c].length;
-    oppEqNum += oppEqAcc[c];
-    oppEqDen += oppClassWeight[c];
-  }
-  const actions: ActionView[] = d.actions.map((a, i) => ({ label: a.label, code: a.code, type: a.type, amount: a.amount, freq: an.actionFreq[i], ev: an.actionEv[i] }));
-  return {
-    kind: "decision",
-    player: d.player,
-    street: d.street,
-    board: ctx.board,
-    pot: d.pot,
-    invested: d.invested,
-    toCall: d.toCall,
-    actions,
-    classFreq,
-    classEv,
-    classWeight,
-    classWeightNorm,
-    oppClassWeightNorm,
-    classEquity,
-    classEqr,
-    classHandEv,
-    combos,
-    rangeEv: an.rangeEv,
-    rangeEquity: an.rangeEquity,
-    oppRangeEquity: oppEqDen > 0 ? oppEqNum / oppEqDen : 0
-  };
+  return { kind: "decision", ...meta, classFreq, classEv, classWeightNorm: seatW[p], seatWeightNorm: seatW, classEquity, classEqr, classHandEv, combos, rangeEv, rangeEquity };
 }
 
 function nodeView(path: PathStep[]): NodeView {
-  const s = solver!;
-  const { node, ctx, reach } = s.walk(path);
-  if (node.kind === "decision") return viewDecision(node, ctx, reach);
-  if (node.kind === "chance") {
-    const live = s.remaining.filter((c) => !ctx.board.includes(c));
-    return { kind: "chance", street: node.street, board: ctx.board, pot: node.pot, invested: node.invested, liveCards: live, allin: node.allin };
-  }
-  // terminal: 양쪽 reach 기준 기대 팟 지분
-  let evOop = 0;
-  let evIp = 0;
-  if (node.type === "fold") {
-    evOop = node.folder === 0 ? 0 : node.pot;
-    evIp = node.pot - evOop;
-  } else {
-    const eq = s.equityVector(ctx, reach[1]);
-    let num = 0;
-    let den = 0;
-    for (let h = 0; h < s.hands.n; h++) {
-      if (reach[0][h] <= 0) continue;
-      num += reach[0][h] * eq[h];
-      den += reach[0][h];
+  if (hu) {
+    const s = hu.solver;
+    const { node, ctx, reach } = s.walk(path);
+    if (node.kind === "decision") {
+      const d: DecisionNode = node;
+      const an = s.analyzeDecision(d, ctx as Ctx, reach);
+      const actions: ActionView[] = d.actions.map((a, i) => ({ label: a.label, code: a.code, type: a.type, amount: a.amount, freq: an.actionFreq[i], ev: an.actionEv[i] }));
+      return buildDecisionView(
+        { n: s.hands.n, combo: s.hands.combo, A: d.actions.length, strategy: an.strategy, ev: an.ev, handEv: an.handEv, equity: an.equity, eqr: an.eqr, M: an.S, reach: [reach[0], reach[1]] },
+        { players: 2, player: d.player, active: [true, true], allin: [false, false], street: d.street, board: ctx.board, pot: d.pot, invested: [d.invested[0], d.invested[1]], toCall: d.toCall, actions },
+        an.rangeEv,
+        an.rangeEquity
+      );
     }
-    const e = den > 0 ? num / den : 0.5;
-    evOop = e * node.pot;
-    evIp = node.pot - evOop;
+    if (node.kind === "chance") {
+      return { kind: "chance", players: 2, street: node.street, board: ctx.board, pot: node.pot, invested: [node.invested[0], node.invested[1]], active: [true, true], liveCards: s.remaining.filter((c) => !ctx.board.includes(c)), allin: node.allin };
+    }
+    let shares: number[];
+    if (node.type === "fold") shares = node.folder === 0 ? [0, node.pot] : [node.pot, 0];
+    else {
+      const eq = s.equityVector(ctx, reach[1]);
+      let num = 0;
+      let den = 0;
+      for (let h = 0; h < s.hands.n; h++) {
+        if (reach[0][h] <= 0) continue;
+        num += reach[0][h] * eq[h];
+        den += reach[0][h];
+      }
+      const e = den > 0 ? num / den : 0.5;
+      shares = [e * node.pot, (1 - e) * node.pot];
+    }
+    return { kind: "terminal", players: 2, type: node.type, board: ctx.board, pot: node.pot, invested: [node.invested[0], node.invested[1]], active: [node.folder !== 0, node.folder !== 1], winner: node.folder === -1 ? -1 : node.folder === 0 ? 1 : 0, shares };
   }
-  return { kind: "terminal", type: node.type, board: ctx.board, pot: node.pot, invested: node.invested, folder: node.folder, evOop, evIp };
+  if (!mu) throw new Error("로드된 스팟이 없습니다");
+  const s = mu.solver;
+  const { node, ctx, reach } = s.walk(path);
+  const P = s.P;
+  if (node.kind === "decision") {
+    const d: MDecision = node;
+    const an = s.analyzeDecision(d, ctx as MCtx, reach);
+    const actions: ActionView[] = d.actions.map((a, i) => ({ label: a.label, code: a.code, type: a.type, amount: a.amount, freq: an.actionFreq[i], ev: an.actionEv[i] }));
+    // EQR = (EV + 투자) / (eq × pot)
+    const eqr = new Float32Array(s.n);
+    for (let h = 0; h < s.n; h++) eqr[h] = an.equity[h] > 1e-6 && d.pot > 0 ? (an.handEv[h] + d.invested[d.player]) / (an.equity[h] * d.pot) : 0;
+    return buildDecisionView(
+      { n: s.n, combo: s.combo, A: d.actions.length, strategy: an.strategy, ev: an.ev, handEv: an.handEv, equity: an.equity, eqr, M: an.M, reach },
+      { players: P, player: d.player, active: d.active, allin: d.allin, street: d.street, board: ctx.board, pot: d.pot, invested: d.invested, toCall: d.toCall, actions },
+      an.rangeEv,
+      an.rangeEquity
+    );
+  }
+  if (node.kind === "chance") {
+    return { kind: "chance", players: P, street: node.street, board: ctx.board, pot: node.pot, invested: node.invested, active: node.active, liveCards: s.remaining.filter((c) => !ctx.board.includes(c)), allin: node.allin };
+  }
+  const shares = new Array<number>(P).fill(0);
+  if (node.type === "fold") shares[node.winner] = node.pot;
+  else {
+    for (let p = 0; p < P; p++) {
+      if (!node.active[p]) continue;
+      const eq = s.equityVector(ctx, p, node.active, reach);
+      let num = 0;
+      let den = 0;
+      for (let h = 0; h < s.n; h++) {
+        if (reach[p][h] <= 0) continue;
+        num += reach[p][h] * eq[h];
+        den += reach[p][h];
+      }
+      shares[p] = (den > 0 ? num / den : 0) * node.pot;
+    }
+  }
+  return { kind: "terminal", players: P, type: node.type, board: ctx.board, pot: node.pot, invested: node.invested, active: node.active, winner: node.winner, shares };
 }
 
 function pfView(path: number[]): PfView {
   const s = pfSolver!;
   const { node, reach } = s.walk(path);
   if (node.kind === "terminal") {
-    return {
-      player: 0,
-      pot: node.pot,
-      invested: node.invested,
-      toCall: 0,
-      actions: [],
-      classFreq: new Float32Array(0),
-      classEv: new Float32Array(0),
-      classWeightNorm: new Float32Array(0),
-      oppClassWeightNorm: new Float32Array(0),
-      isTerminal: true,
-      terminalType: node.type
-    };
+    return { player: 0, pot: node.pot, invested: node.invested, toCall: 0, actions: [], classFreq: new Float32Array(0), classEv: new Float32Array(0), classWeightNorm: new Float32Array(0), oppClassWeightNorm: new Float32Array(0), isTerminal: true, terminalType: node.type };
   }
   const d = node as PfDecision;
   const an = s.analyze(d, reach);
@@ -206,10 +246,11 @@ function pfView(path: number[]): PfView {
   const N = NUM_CLASSES;
   const classFreq = new Float32Array(N * A);
   const classEv = new Float32Array(N * A);
-  for (let c = 0; c < N; c++) for (let a = 0; a < A; a++) {
-    classFreq[c * A + a] = an.strategy[a * N + c];
-    classEv[c * A + a] = an.ev[a * N + c];
-  }
+  for (let c = 0; c < N; c++)
+    for (let a = 0; a < A; a++) {
+      classFreq[c * A + a] = an.strategy[a * N + c];
+      classEv[c * A + a] = an.ev[a * N + c];
+    }
   const cw = new Float32Array(N);
   const ow = new Float32Array(N);
   const rP = reach[d.player];
@@ -218,18 +259,7 @@ function pfView(path: number[]): PfView {
     cw[c] = rP[c] / CLASS_COMBOS[c].length;
     ow[c] = rO[c] / CLASS_COMBOS[c].length;
   }
-  return {
-    player: d.player,
-    pot: d.pot,
-    invested: d.invested,
-    toCall: d.toCall,
-    actions: d.actions.map((a, i) => ({ label: a.label, code: a.code, type: a.type, amount: a.amount, freq: an.freq[i], ev: an.actionEv[i] })),
-    classFreq,
-    classEv,
-    classWeightNorm: cw,
-    oppClassWeightNorm: ow,
-    isTerminal: false
-  };
+  return { player: d.player, pot: d.pot, invested: d.invested, toCall: d.toCall, actions: d.actions.map((a, i) => ({ label: a.label, code: a.code, type: a.type, amount: a.amount, freq: an.freq[i], ev: an.actionEv[i] })), classFreq, classEv, classWeightNorm: cw, oppClassWeightNorm: ow, isTerminal: false };
 }
 
 self.onmessage = async (ev: MessageEvent<Envelope<Req>>) => {
@@ -237,24 +267,31 @@ self.onmessage = async (ev: MessageEvent<Envelope<Req>>) => {
   try {
     switch (req.type) {
       case "estimate": {
-        const t = buildTree(req.config);
-        const est = estimateTree(req.config);
-        // 핸드 수
-        const dead = new Set(req.config.board);
         let hands = 0;
-        for (let i = 0; i < 1326; i++) {
-          if (req.oop[i] <= 0 && req.ip[i] <= 0) continue;
-          hands++;
+        for (let i = 0; i < 1326; i++) if (req.ranges.some((r) => r[i] > 0)) hands++;
+        let decisionNodes: number;
+        let actionSlots: number;
+        let bytes: number;
+        if (req.players === 2) {
+          const t = buildTree(req.config!);
+          const est = estimateTree(req.config!);
+          decisionNodes = est.decision;
+          actionSlots = est.actionSlots;
+          bytes = PostflopSolver.estimateBytes(t, hands);
+        } else {
+          const t = buildMultiTree(req.mconfig!);
+          const est = estimateMultiTree(req.mconfig!);
+          decisionNodes = est.decision;
+          actionSlots = est.actionSlots;
+          bytes = MultiSolver.estimateBytes(t, hands);
         }
-        void dead;
-        const bytes = PostflopSolver.estimateBytes(t, hands);
-        const res: EstimateResult = { decisionNodes: est.decision, actionSlots: est.actionSlots, hands, bytes, estSecondsPerIter: (est.actionSlots * hands * 2 * 12) / 2.5e8 };
+        const perPlayerFactor = req.players === 2 ? 1 : req.players * (req.players === 3 ? 8 : 3);
+        const res: EstimateResult = { decisionNodes, actionSlots, hands, bytes, estSecondsPerIter: (actionSlots * hands * 2 * 12 * perPlayerFactor) / 2.5e8 };
         post(id, { type: "result", data: res });
         break;
       }
       case "solve.start": {
-        tree = buildTree(req.config);
-        solver = new PostflopSolver(tree, req.oop, req.ip);
+        loadSpot(req);
         await runSolve(id, req.targetExploitPct, req.maxIters, req.maxMs, req.batch);
         break;
       }
@@ -268,26 +305,24 @@ self.onmessage = async (ev: MessageEvent<Envelope<Req>>) => {
         break;
       }
       case "spot.load": {
-        tree = buildTree(req.config);
-        solver = new PostflopSolver(tree, req.oop, req.ip);
-        solver.loadStrategy(req.strategy, req.iterations);
-        post(id, { type: "result", data: solver.metrics() });
+        loadSpot(req);
+        if (hu) hu.solver.loadStrategy(req.strategy, req.iterations);
+        else mu!.solver.loadStrategy(req.strategy, req.iterations);
+        post(id, { type: "result", data: metrics() });
         break;
       }
       case "spot.export": {
-        if (!solver) throw new Error("솔버 없음");
-        const strategy = solver.serializeStrategy();
-        post(id, { type: "result", data: { strategy, iterations: solver.iterationCount, metrics: solver.metrics() } }, [strategy.buffer]);
+        const strategy = hu ? hu.solver.serializeStrategy() : mu ? mu.solver.serializeStrategy() : null;
+        if (!strategy) throw new Error("솔버 없음");
+        post(id, { type: "result", data: { strategy, iterations: iterationCount(), metrics: metrics() } }, [strategy.buffer]);
         break;
       }
       case "node.view": {
-        if (!solver) throw new Error("로드된 스팟이 없습니다");
         post(id, { type: "result", data: nodeView(req.path) });
         break;
       }
       case "equity": {
-        const r = rangeVsRange(req.oop, req.ip, req.board, req.samples);
-        post(id, { type: "result", data: r });
+        post(id, { type: "result", data: rangeVsRange(req.oop, req.ip, req.board, req.samples) });
         break;
       }
       case "handVsHand": {
@@ -295,7 +330,7 @@ self.onmessage = async (ev: MessageEvent<Envelope<Req>>) => {
         break;
       }
       case "preflop.matrix": {
-        const m = buildEquityMatrix(req.samplesPerPair, 2026, (p) => post(id, { type: "progress", data: { iterations: Math.round(p * 1000), exploitabilityPct: 0, elapsedMs: 0, evOop: 0, evIp: 0, done: false } }));
+        const m = buildEquityMatrix(req.samplesPerPair, 2026, (p) => post(id, { type: "progress", data: { iterations: Math.round(p * 1000), exploitabilityPct: 0, elapsedMs: 0, ev: [], evOop: 0, evIp: 0, done: false } }));
         post(id, { type: "result", data: m }, [m.buffer]);
         break;
       }
@@ -310,7 +345,7 @@ self.onmessage = async (ev: MessageEvent<Envelope<Req>>) => {
           pfSolver.step(n);
           done += n;
           const m = pfSolver.metrics();
-          post(id, { type: "progress", data: { iterations: m.iterations, exploitabilityPct: m.exploitabilityPct, elapsedMs: performance.now() - start, evOop: m.evSb, evIp: m.evBb, done: false } });
+          post(id, { type: "progress", data: { iterations: m.iterations, exploitabilityPct: m.exploitabilityPct, elapsedMs: performance.now() - start, ev: [m.evSb, m.evBb], evOop: m.evSb, evIp: m.evBb, done: false } });
           await yieldToQueue();
         }
         const m = pfSolver.metrics();
