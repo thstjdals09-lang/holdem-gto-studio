@@ -28,6 +28,7 @@ interface Feedback {
   bestLabel: string;
   evs: number[];
   strategy: number[];
+  labels: string[];
   evLoss: number;
   evLossPot: number;
   verdict: "correct" | "inaccuracy" | "blunder";
@@ -187,7 +188,7 @@ export function TrainerPage() {
     for (let k = 1; k < evs.length; k++) if (evs[k] > evs[bestIdx]) bestIdx = k;
     const evLoss = Math.max(0, evs[bestIdx] - evs[i]);
     const evLossPot = v.pot > 0 ? evLoss / v.pot : 0;
-    const fb: Feedback = { chosen: i, chosenLabel: v.actions[i].label, bestIdx, bestLabel: v.actions[bestIdx].label, evs, strategy, evLoss, evLossPot, verdict: verdictOf(evLossPot, strategy[i]), pot: v.pot };
+    const fb: Feedback = { chosen: i, chosenLabel: v.actions[i].label, bestIdx, bestLabel: v.actions[bestIdx].label, evs, strategy, labels: v.actions.map((a) => a.label), evLoss, evLossPot, verdict: verdictOf(evLossPot, strategy[i]), pot: v.pot };
     const rec: TrainerRecord = {
       id: newId(),
       at: Date.now(),
@@ -528,7 +529,7 @@ function FeedbackCard({ fb, spotId, path, navigate }: { fb: Feedback; colors: st
         <tbody>
           {fb.evs.map((e, i) => (
             <tr key={i} style={{ fontWeight: i === fb.bestIdx ? 700 : 400 }}>
-              <td>{i === fb.chosen ? "▶ " : ""}{i === fb.bestIdx ? "★ " : ""}액션 {i + 1}</td>
+              <td>{i === fb.chosen ? "▶ " : ""}{i === fb.bestIdx ? "★ " : ""}{fb.labels[i]}</td>
               <td>{pct(fb.strategy[i], 0)}</td>
               <td>{bb(e)}</td>
             </tr>
