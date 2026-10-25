@@ -13,8 +13,13 @@ fi
 # .git 을 제외한 기존 파일 정리 후 복사
 find "$SITE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 # 이전 캐시 기준 포스트플랍 조각(btn-bb-srp 등)과 보관용 *.old.json 은 배포하지 않는다
-tar -C "$ROOT/dist" --exclude='./lib/postflop/btn-bb-srp' --exclude='./lib/postflop/co-bb-srp' --exclude='./lib/postflop/sb-bb-srp' --exclude='./lib/postflop/bb-btn-3bp' --exclude='*.old.json' -cf - . | tar -C "$SITE" -xf -
+# SKIP_POSTFLOP=1 이면 포스트플랍 라이브러리를 빼고 배포 (생성 중일 때 1차 배포용)
+EXTRA=""
+if [ "${SKIP_POSTFLOP:-0}" = "1" ]; then EXTRA="--exclude=./lib/postflop"; fi
+tar -C "$ROOT/dist" $EXTRA --exclude='./lib/postflop/btn-bb-srp' --exclude='./lib/postflop/co-bb-srp' --exclude='./lib/postflop/sb-bb-srp' --exclude='./lib/postflop/bb-btn-3bp' --exclude='*.old.json' -cf - . | tar -C "$SITE" -xf -
 touch "$SITE/.nojekyll"
+# 데이터·번들 파일의 줄바꿈 변환 금지
+echo "* -text" > "$SITE/.gitattributes"
 cat > "$SITE/README.md" <<'MD'
 # 홀덤 GTO 스튜디오 (배포본)
 

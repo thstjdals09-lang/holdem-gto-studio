@@ -173,7 +173,7 @@ function PreflopNodeView({ lib, node, reach, onAction }: { lib: PfLib; node: PfL
       <div className="card col">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h3 style={{ margin: 0 }}>
-            <b style={{ color: "var(--accent)" }}>{lib.format.positions[node.p]}</b> 행동 · {node.call > 0 ? `콜 ${bb(node.call, 1)}` : "오픈 기회"}
+            <b style={{ color: "var(--accent)" }}>{lib.format.positions[node.p]}</b> 차례 · {node.call <= 0 ? "체크 가능" : node.lv === 0 ? "오픈 기회" : `콜 금액 ${bb(node.call, 1)}bb`}
           </h3>
           <div className="tabs" style={{ margin: 0, border: "none" }}>
             <button className={mode === "strategy" ? "active" : ""} onClick={() => setMode("strategy")}>
