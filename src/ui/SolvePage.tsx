@@ -32,20 +32,23 @@ export function SolvePage() {
   const { navigate } = useHashRoute();
   const pending = useMemo(() => store.takePendingSolve(), []);
   const [name, setName] = useState("");
-  const [players, setPlayers] = useState(2);
-  const [boardText, setBoardText] = useState("Ks7d2c");
-  const [board, setBoard] = useState<number[] | null>(parseCards("Ks7d2c"));
+  const [players, setPlayers] = useState(pending?.players ?? 2);
+  const [boardText, setBoardText] = useState(pending?.board ?? "Ks7d2c");
+  const [board, setBoard] = useState<number[] | null>(() => {
+    try {
+      return parseCards(pending?.board ?? "Ks7d2c");
+    } catch {
+      return null;
+    }
+  });
   const [pot, setPot] = useState(pending?.pot ?? 5.5);
   const [effStack, setEffStack] = useState(pending?.effStack ?? 97.5);
   const [rakePct, setRakePct] = useState(0);
   const [rakeCap, setRakeCap] = useState(0);
   const [rangeTexts, setRangeTexts] = useState<string[]>(() => {
-    const d = DEFAULT_RANGES[2].slice();
-    if (pending) {
-      d[0] = pending.oopText;
-      d[1] = pending.ipText;
-    }
-    return d.concat(DEFAULT_RANGES[6].slice(2));
+    const d = DEFAULT_RANGES[2].concat(DEFAULT_RANGES[6].slice(2));
+    if (pending) pending.rangeTexts.forEach((t, i) => (d[i] = t));
+    return d;
   });
   const [oopBet, setOopBet] = useState({ flop: "33 75", turn: "66", river: "75" });
   const [ipBet, setIpBet] = useState({ flop: "33 75", turn: "66", river: "75" });
@@ -352,7 +355,7 @@ export function SolvePage() {
               </button>
             )}
             {!running && progress && <button onClick={continueSolve}>이어서 더 정밀하게</button>}
-            {savedId && <button onClick={() => navigate("/study", { spot: savedId })}>스터디에서 열기 →</button>}
+            {savedId && <button onClick={() => navigate("/mysolves", { spot: savedId })}>스터디에서 열기 →</button>}
           </div>
           {progress && (
             <div className="col">
@@ -431,7 +434,7 @@ export function SolvePage() {
                   <td>{s.exploitabilityPct.toFixed(2)}%</td>
                   <td>{s.ev.map((e, i) => <span key={i} style={{ color: SEAT_COLORS[i], marginRight: 6 }}>{bb(e)}</span>)}</td>
                   <td className="row">
-                    <button onClick={() => navigate("/study", { spot: s.id })}>스터디</button>
+                    <button onClick={() => navigate("/mysolves", { spot: s.id })}>스터디</button>
                     <button onClick={() => navigate("/trainer", { spot: s.id })}>트레이너</button>
                     <button
                       onClick={() => {

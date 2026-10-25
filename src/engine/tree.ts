@@ -24,6 +24,7 @@ export interface TreeConfig {
   ip: StreetSizings;
   allinThresholdPct: number; // 벳/레이즈가 남은 스택의 이 % 이상이면 올인으로 치환. 0 = 끔
   maxRaisesPerStreet: number; // 스트리트당 벳+레이즈 최대 횟수 (예: 3 → 벳, 레이즈, 리레이즈)
+  maxRaisesByStreet?: [number, number, number]; // [플랍, 턴, 리버] 개별 상한 (있으면 우선)
   allowDonk: boolean; // 이전 스트리트 어그레서가 IP일 때 OOP가 리드할 수 있는지
   includeAllin: boolean; // 사이즈 목록에 올인을 항상 추가
 }
@@ -171,7 +172,8 @@ export function buildTree(cfg: TreeConfig): GameTree {
     const siz = sizingsFor(cfg, player, st.street);
     const maxPut = Math.min(stack, st.toCall + oppStack); // 상대가 콜할 수 있는 한도까지만 의미 있음
     if (stack <= 0) return out;
-    const canRaise = st.raises < cfg.maxRaisesPerStreet;
+    const cap = cfg.maxRaisesByStreet ? cfg.maxRaisesByStreet[st.street - 1] : cfg.maxRaisesPerStreet;
+    const canRaise = st.raises < cap;
     const amounts: Array<{ amt: number; type: ActionType; pct: number }> = [];
     if (st.toCall === 0) {
       let list = siz.bet;

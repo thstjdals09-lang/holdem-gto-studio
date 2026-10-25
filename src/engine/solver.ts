@@ -48,6 +48,7 @@ export function buildHandSet(board: number[], w0: RangeWeights, w1: RangeWeights
 interface BoardEval {
   strength: Int32Array; // 슬롯별 강도 (-1 = 보드와 충돌)
   order: Int32Array; // 살아있는 슬롯을 강도 오름차순 정렬
+  bounds: Int32Array; // 같은 강도 그룹의 시작 위치들 + 끝(m)
 }
 
 export type PathStep = { kind: "action"; index: number } | { kind: "card"; card: number };
@@ -98,7 +99,6 @@ export class PostflopSolver {
   readonly mult: Int32Array; // 결정 노드별 런아웃 배수 (1, R, R*R)
   regret: Float32Array[];
   stratSum: Float32Array[];
-  private boardCache = new Map<number, BoardEval>();
   private pool: Float32Array[][] = [];
   private iterations = 0;
   private elapsedMs = 0;
@@ -186,15 +186,20 @@ export class PostflopSolver {
   }
 
   // ---------- 보드 평가 캐시 ----------
-  private boardKey(board: number[]): number {
-    const s = board.slice().sort((x, y) => x - y);
-    let k = 0;
-    for (const c of s) k = k * 52 + c;
-    return k;
+  // 시작 보드 이후 런아웃 카드(최대 2장)의 인덱스로 배열 캐시 (정렬해 순서 무관)
+  private evalCache: (BoardEval | undefined)[] = [];
+  private evalKey(board: number[]): number {
+    const start = this.tree.config.board.length;
+    const R1 = this.R + 1;
+    if (board.length === start) return 0;
+    const i1 = this.cardIdx[board[start]] + 1;
+    if (board.length === start + 1) return i1;
+    const i2 = this.cardIdx[board[start + 1]] + 1;
+    return i1 < i2 ? i1 * R1 + i2 : i2 * R1 + i1;
   }
   private evalBoard(board: number[]): BoardEval {
-    const key = this.boardKey(board);
-    let e = this.boardCache.get(key);
+    const key = this.evalKey(board);
+    let e = this.evalCache[key];
     if (e) return e;
     const n = this.hands.n;
     const strength = new Int32Array(n);
@@ -216,8 +221,11 @@ export class PostflopSolver {
     }
     const order = this.sortBuf.slice(0, live);
     order.sort((x, y) => strength[x] - strength[y]);
-    e = { strength, order };
-    this.boardCache.set(key, e);
+    const b: number[] = [];
+    for (let i = 0; i < live; i++) if (i === 0 || strength[order[i]] !== strength[order[i - 1]]) b.push(i);
+    b.push(live);
+    e = { strength, order, bounds: Int32Array.from(b) };
+    this.evalCache[key] = e;
     return e;
   }
 
@@ -262,50 +270,49 @@ export class PostflopSolver {
 
   /** 쇼다운: out[h] = potPrime*(약한 상대 reach + 0.5*동점) - I*S_h */
   private showdownCFV(board: number[], ro: Float32Array, potPrime: number, I: number, out: Float32Array): void {
-    const ev = this.evalBoard(board);
-    const { strength, order } = ev;
-    const n = this.hands.n;
+    const { order, bounds } = this.evalBoard(board);
     const total = this.computeTotals(ro);
     const tc = this.totalCard;
     const cum = this.cumCard;
-    const gc = this.groupCard;
+    const gc = this.groupCard; // 항상 0으로 유지 (그룹 처리 후 건드린 칸만 되돌림)
     cum.fill(0);
     let cumAll = 0;
     const ha = this.hands.a;
     const hb = this.hands.b;
     out.fill(0);
-    let i = 0;
-    const m = order.length;
-    while (i < m) {
-      let j = i;
-      const st = strength[order[i]];
+    const G = bounds.length - 1;
+    for (let g = 0; g < G; g++) {
+      const i = bounds[g];
+      const j = bounds[g + 1];
       let groupSum = 0;
-      gc.fill(0);
-      while (j < m && strength[order[j]] === st) {
-        const h = order[j];
+      for (let k = i; k < j; k++) {
+        const h = order[k];
         const v = ro[h];
         groupSum += v;
         gc[ha[h]] += v;
         gc[hb[h]] += v;
-        j++;
       }
       for (let k = i; k < j; k++) {
         const h = order[k];
         const a = ha[h];
         const b = hb[h];
+        const rv = ro[h];
         const weaker = cumAll - cum[a] - cum[b];
-        const tie = groupSum - gc[a] - gc[b] + ro[h];
-        const S = total - tc[a] - tc[b] + ro[h];
+        const tie = groupSum - gc[a] - gc[b] + rv;
+        const S = total - tc[a] - tc[b] + rv;
         out[h] = potPrime * (weaker + 0.5 * tie) - I * S;
       }
       for (let k = i; k < j; k++) {
         const h = order[k];
         const v = ro[h];
+        const a = ha[h];
+        const b = hb[h];
         cumAll += v;
-        cum[ha[h]] += v;
-        cum[hb[h]] += v;
+        cum[a] += v;
+        cum[b] += v;
+        gc[a] = 0;
+        gc[b] = 0;
       }
-      i = j;
     }
   }
 
@@ -535,8 +542,20 @@ export class PostflopSolver {
       const tmp = this.buf(depth, 2);
       if (mode === "br") out.fill(-Infinity);
       else out.fill(0);
+      const rec = mode === "avg" && this.evRec && d.street <= this.evMaxStreet ? this.evRec[d.id] : null;
+      let Sx: Float32Array | null = null;
+      let recOff = 0;
+      if (rec) {
+        Sx = new Float32Array(n);
+        this.fillS(rO, Sx);
+        recOff = this.offset(d, ctx);
+      }
       for (let a = 0; a < A; a++) {
         this.evalTraverse(d.children[a], depth + 1, ctx, p, rO, mode, tmp);
+        if (rec && Sx) {
+          const base = recOff + a * n;
+          for (let h = 0; h < n; h++) rec[base + h] = Sx[h] > 0 ? tmp[h] / Sx[h] + d.invested[p] : 0;
+        }
         if (mode === "br") {
           for (let h = 0; h < n; h++) if (tmp[h] > out[h]) out[h] = tmp[h];
         } else {
@@ -719,6 +738,25 @@ export class PostflopSolver {
       rangeEv: wsum > 0 ? rangeEv / wsum : 0,
       rangeEquity: wsum > 0 ? rangeEq / wsum : 0
     };
+  }
+
+  // ---------- 노드별 EV 기록 ----------
+  private evRec: Float32Array[] | null = null;
+  private evMaxStreet = 2;
+  /** maxStreet 이하 스트리트의 모든 결정 노드(런아웃별)에 대해 액션별 EV(bb, 노드 기준 순이익)를 기록 */
+  recordEVs(maxStreet = 2): Float32Array[] {
+    const n = this.hands.n;
+    this.evMaxStreet = maxStreet;
+    this.evRec = this.tree.decisionNodes.map((d) => (d.street <= maxStreet ? new Float32Array(this.mult[d.id] * d.actions.length * n) : new Float32Array(0)));
+    const out = new Float32Array(n);
+    for (const p of [0, 1] as const) this.evalTraverse(this.tree.root, 0, this.rootCtx(), p, this.w[p === 0 ? 1 : 0], "avg", out);
+    const r = this.evRec;
+    this.evRec = null;
+    return r;
+  }
+  /** 런아웃 오프셋 계산 (외부용) */
+  runoutOffset(d: DecisionNode, ctx: Ctx): number {
+    return this.offset(d, ctx);
   }
 
   // ---------- 저장/복원 ----------

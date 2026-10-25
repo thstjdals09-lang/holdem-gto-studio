@@ -4,6 +4,10 @@ import { evaluate, describe } from "../engine/evaluator";
 import { auxClient } from "../worker/client";
 import type { DecisionView, NodeView } from "../worker/protocol";
 import { db, newId, spotInput, type Drill, type SavedSpot, type TrainerRecord } from "./db";
+import { MATCHUPS, type MatchupIndex } from "../lib/postflopLib";
+import { walkCodes } from "../lib/preflopLib";
+import { encodeIdx, libBase, loadMatchupIndex, loadPreflop } from "./lib";
+import { PreflopTrainer } from "./PreflopTrainer";
 import { Board, PlayingCard, Spinner, useHashRoute } from "./common";
 import { actionColors, bb, pct, STREET_LABEL, seatLabels, SEAT_COLORS } from "./format";
 import { decodePath, encodePath, store } from "./store";
@@ -67,10 +71,24 @@ export function TrainerPage() {
   const [drills, setDrills] = useState<Drill[]>([]);
   const [drillName, setDrillName] = useState("");
   const [activeDrill, setActiveDrill] = useState<Drill | null>(null);
-  const [tab, setTab] = useState<"play" | "stats" | "drills">("play");
+  const [tab, setTab] = useState<"preflop" | "play" | "stats" | "drills">(params.get("spot") || params.get("m") ? "play" : "preflop");
   const autoNext = useRef(false);
-  const P = spot?.players ?? 2;
-  const labels = seatLabels(P);
+  const [srcKind, setSrcKind] = useState<"lib" | "mine">(params.get("spot") ? "mine" : "lib");
+  const [mid, setMid] = useState(params.get("m") ?? MATCHUPS[0].id);
+  const [flopSel, setFlopSel] = useState(params.get("fl") ?? "random");
+  const [libIdx, setLibIdx] = useState<MatchupIndex | null>(null);
+  const [libFlop, setLibFlop] = useState<string | null>(null);
+  const [pfPath, setPfPath] = useState<number[] | null>(null);
+  const matchup = MATCHUPS.find((x) => x.id === mid) ?? MATCHUPS[0];
+  const isLib = srcKind === "lib";
+  const P = isLib ? 2 : spot?.players ?? 2;
+  const labels = isLib ? [matchup.oop, matchup.ip] : seatLabels(P);
+  const srcId = isLib ? `lib:${mid}/${libFlop ?? ""}` : spot?.id ?? "";
+  const srcName = isLib ? `${matchup.name} ${libFlop ?? ""}` : spot?.name ?? "";
+  useEffect(() => {
+    loadMatchupIndex(mid).then(setLibIdx);
+    loadPreflop(matchup.format).then((lib) => setPfPath(walkCodes(lib, matchup.codes).steps.map((s) => s.action)));
+  }, [mid]);
 
   useEffect(() => {
     db.listSpots().then((s) => {
@@ -83,7 +101,7 @@ export function TrainerPage() {
   }, []);
 
   useEffect(() => {
-    if (!spotId) return;
+    if (!spotId || srcKind !== "mine") return;
     db.getSpot(spotId).then(async (s) => {
       if (!s) return;
       setSpot(s);
@@ -100,16 +118,24 @@ export function TrainerPage() {
         }
       }
     });
-  }, [spotId]);
+  }, [spotId, srcKind]);
 
   const view = (p: Step[]) => auxClient.call<NodeView>({ type: "node.view", path: p });
 
   async function deal() {
-    if (!spot) return;
+    if (!isLib && !spot) return;
     setBusy(true);
     setErr(null);
     try {
-      const root = await view(startPath);
+      if (isLib) {
+        const list = libIdx?.flops.map((f) => f.flop) ?? [];
+        if (list.length === 0) throw new Error("이 매치업의 라이브러리가 아직 없습니다");
+        const fl = flopSel === "random" ? list[Math.floor(Math.random() * list.length)] : flopSel;
+        await auxClient.call({ type: "lib.load", baseUrl: libBase(), matchup: mid, flop: fl });
+        store.auxSpotId = null;
+        setLibFlop(fl);
+      }
+      const root = await view(isLib && flopSel === "random" ? [] : startPath);
       if (root.kind !== "decision") throw new Error("시작 지점이 결정 노드가 아닙니다. 스터디에서 결정 노드를 고르세요.");
       const heroSeat = seatPref < 0 || seatPref >= root.players ? Math.floor(Math.random() * root.players) : seatPref;
       // 플레이어별로 reach에 따라 샘플, 카드 충돌 제외 (히어로 먼저)
@@ -190,7 +216,7 @@ export function TrainerPage() {
   }
 
   async function act(i: number) {
-    if (!hand || !hand.view || hand.view.kind !== "decision" || !spot) return;
+    if (!hand || !hand.view || hand.view.kind !== "decision" || (!isLib && !spot)) return;
     const v = hand.view as DecisionView;
     const entry = v.combos.find((c) => c.combo === hand.combos[hand.heroSeat]);
     const evs = entry ? entry.ev : v.actions.map((a) => a.ev);
@@ -203,8 +229,8 @@ export function TrainerPage() {
     const rec: TrainerRecord = {
       id: newId(),
       at: Date.now(),
-      spotId: spot.id,
-      spotName: spot.name,
+      spotId: srcId,
+      spotName: srcName,
       heroSeat: hand.heroSeat,
       seatLabel: labels[hand.heroSeat],
       street: v.street,
@@ -275,34 +301,86 @@ export function TrainerPage() {
           트레이너 <span className="muted" style={{ fontSize: 13 }}>GTO 상대와 플레이</span>
         </h2>
         <div className="tabs" style={{ margin: 0, borderBottom: "none" }}>
-          {(["play", "stats", "drills"] as const).map((t) => (
+          {(["preflop", "play", "stats", "drills"] as const).map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-              {t === "play" ? "플레이" : t === "stats" ? "통계" : "드릴"}
+              {t === "preflop" ? "프리플랍" : t === "play" ? "포스트플랍" : t === "stats" ? "통계" : "드릴"}
             </button>
           ))}
         </div>
       </div>
       {err && <div className="error">{err}</div>}
+      {tab === "preflop" && (
+        <div style={{ marginTop: 10 }}>
+          <PreflopTrainer />
+        </div>
+      )}
       {tab === "play" && (
         <div className="grid2" style={{ marginTop: 10 }}>
           <div className="col">
             <div className="card row">
               <label className="col" style={{ fontSize: 12 }}>
-                스팟
+                출처
                 <select
-                  value={spotId}
+                  value={srcKind}
                   onChange={(e) => {
-                    setSpotId(e.target.value);
+                    setSrcKind(e.target.value as "lib" | "mine");
+                    setHand(null);
                     setActiveDrill(null);
                   }}
                 >
-                  {spots.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
+                  <option value="lib">라이브러리 (미리 푼 스팟)</option>
+                  <option value="mine">내 솔브</option>
                 </select>
               </label>
+              {isLib ? (
+                <>
+                  <label className="col" style={{ fontSize: 12 }}>
+                    매치업
+                    <select
+                      value={mid}
+                      onChange={(e) => {
+                        setMid(e.target.value);
+                        setFlopSel("random");
+                        setHand(null);
+                      }}
+                    >
+                      {MATCHUPS.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="col" style={{ fontSize: 12 }}>
+                    플랍
+                    <select value={flopSel} onChange={(e) => setFlopSel(e.target.value)}>
+                      <option value="random">무작위 ({libIdx?.flops.length ?? 0}개)</option>
+                      {libIdx?.flops.map((f) => (
+                        <option key={f.flop} value={f.flop}>
+                          {f.flop}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              ) : (
+                <label className="col" style={{ fontSize: 12 }}>
+                  스팟
+                  <select
+                    value={spotId}
+                    onChange={(e) => {
+                      setSpotId(e.target.value);
+                      setActiveDrill(null);
+                    }}
+                  >
+                    {spots.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label className="col" style={{ fontSize: 12 }}>
                 내 자리
                 <select value={seatPref} onChange={(e) => setSeatPref(Number(e.target.value))}>
@@ -317,13 +395,13 @@ export function TrainerPage() {
               <label className="row" style={{ fontSize: 12 }}>
                 <input type="checkbox" onChange={(e) => (autoNext.current = e.target.checked)} /> 자동 다음 핸드
               </label>
-              <button className="primary" disabled={!spot || busy} onClick={deal}>
+              <button className="primary" disabled={(!isLib && !spot) || busy} onClick={deal}>
                 {hand ? "다음 핸드" : "핸드 시작"}
               </button>
               {startPath.length > 0 && <span className="badge">스터디 지점에서 시작 ({startPath.length}단계)</span>}
               {activeDrill && <span className="badge ok">드릴: {activeDrill.name}</span>}
             </div>
-            {spots.length === 0 && (
+            {!isLib && spots.length === 0 && (
               <div className="card muted">
                 솔브된 스팟이 없습니다. <a href="#/solve">커스텀 솔브</a>에서 먼저 만드세요.
               </div>
@@ -357,6 +435,7 @@ export function TrainerPage() {
                   </div>
                   <div className="col" style={{ alignItems: "center" }}>
                     <Board cards={hand.view?.board ?? spot?.board ?? []} />
+                    {isLib && libFlop && <div className="small muted">{matchup.name}</div>}
                     <div style={{ fontWeight: 700 }}>팟 {bb(hand.view?.pot ?? 0)} bb</div>
                   </div>
                   <div className="seat hero-hand">
@@ -401,7 +480,16 @@ export function TrainerPage() {
             )}
           </div>
           <div className="col">
-            {hand?.feedback && <FeedbackCard fb={hand.feedback} spotId={spotId} path={hand.path.slice(0, -1)} navigate={navigate} />}
+            {hand?.feedback && (
+              <FeedbackCard
+                fb={hand.feedback}
+                onStudy={() => {
+                  const p = encodePath(hand.path.slice(0, -1));
+                  if (isLib && libFlop && pfPath) navigate("/study", { fmt: matchup.format, pf: encodeIdx(pfPath), fl: libFlop, pp: p });
+                  else navigate("/mysolves", { spot: spotId, path: p });
+                }}
+              />
+            )}
             {!hand?.feedback && (
               <div className="card muted">
                 <h3>채점 기준</h3>
@@ -566,7 +654,7 @@ export function TrainerPage() {
             <input placeholder="드릴 이름 (예: K72r BTN vs BB 플랍)" value={drillName} onChange={(e) => setDrillName(e.target.value)} style={{ width: 280 }} />
             <button
               className="primary"
-              disabled={!spot || drillName.trim().length < 2}
+              disabled={isLib || !spot || drillName.trim().length < 2}
               onClick={async () => {
                 const d: Drill = { id: newId(), name: drillName.trim(), spotId: spot!.id, heroSeat: seatPref, startPath, createdAt: Date.now(), handsPlayed: 0, correct: 0, inaccuracy: 0, blunder: 0, evLossSum: 0 };
                 await db.putDrill(d);
@@ -648,7 +736,7 @@ export function TrainerPage() {
   );
 }
 
-function FeedbackCard({ fb, spotId, path, navigate }: { fb: Feedback; spotId: string; path: Step[]; navigate: (p: string, q?: Record<string, string>) => void }) {
+function FeedbackCard({ fb, onStudy }: { fb: Feedback; onStudy: () => void }) {
   const labelOf = (v: Feedback["verdict"]) => (v === "correct" ? "정확!" : v === "inaccuracy" ? "부정확" : "블런더");
   return (
     <div className="card col">
@@ -681,7 +769,7 @@ function FeedbackCard({ fb, spotId, path, navigate }: { fb: Feedback; spotId: st
           ))}
         </tbody>
       </table>
-      <button onClick={() => navigate("/study", { spot: spotId, path: encodePath(path) })}>이 스팟 스터디에서 보기 →</button>
+      <button onClick={onStudy}>이 스팟 스터디에서 보기 →</button>
     </div>
   );
 }

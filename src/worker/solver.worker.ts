@@ -5,11 +5,15 @@ import { PostflopSolver, type Ctx } from "../engine/solver";
 import { buildMultiTree, estimateMultiTree, MultiSolver, type MCtx, type MDecision, type MultiTree } from "../engine/multi";
 import { rangeVsRange, handVsHand } from "../engine/equity";
 import { buildEquityMatrix, buildNonConflict, buildPreflopTree, PreflopSolver, type PfDecision } from "../engine/preflop";
-import type { ActionView, DecisionView, Envelope, EstimateResult, NodeView, PathStep, PfView, Req, Res, SpotInput } from "./protocol";
+import type { ActionView, Envelope, EstimateResult, NodeView, PathStep, PfView, Req, Res, SpotInput } from "./protocol";
+import { buildDecisionView } from "./views";
+import { LibSpot } from "./libspot";
 
 // 현재 로드된 스팟 (HU 또는 멀티)
 let hu: { tree: GameTree; solver: PostflopSolver } | null = null;
 let mu: { tree: MultiTree; solver: MultiSolver } | null = null;
+let lib: LibSpot | null = null;
+let libKey = "";
 let stopRequested = false;
 let pfSolver: PreflopSolver | null = null;
 let nonConflict: Float32Array | null = null;
@@ -41,6 +45,8 @@ function step(n: number) {
 function loadSpot(input: SpotInput) {
   hu = null;
   mu = null;
+  lib = null;
+  libKey = "";
   if (input.players === 2) {
     if (!input.config) throw new Error("HU 설정이 없습니다");
     const tree = buildTree(input.config);
@@ -82,82 +88,6 @@ async function runSolve(id: number, targetExploitPct: number, maxIters: number, 
   }
   post(id, { type: "progress", data: { ...m, done: true, reason } });
   post(id, { type: "result", data: { ...m, reason } });
-}
-
-interface ViewSource {
-  n: number;
-  combo: Int32Array;
-  A: number;
-  strategy: Float32Array;
-  ev: Float32Array;
-  handEv: Float32Array;
-  equity: Float32Array;
-  eqr?: Float32Array;
-  M: Float32Array; // 상대 조합 질량 (가중치용)
-  reach: Float32Array[];
-}
-
-function buildDecisionView(src: ViewSource, meta: Omit<DecisionView, "classFreq" | "classEv" | "classWeightNorm" | "seatWeightNorm" | "classEquity" | "classEqr" | "classHandEv" | "combos" | "rangeEv" | "rangeEquity" | "kind">, rangeEv: number, rangeEquity: number): DecisionView {
-  const { n, combo, A, strategy, ev, handEv, equity, M, reach } = src;
-  const P = reach.length;
-  const p = meta.player;
-  const rP = reach[p];
-  const classFreq = new Float32Array(NUM_CLASSES * A);
-  const classEv = new Float32Array(NUM_CLASSES * A);
-  const classWsum = new Float32Array(NUM_CLASSES);
-  const classEquity = new Float32Array(NUM_CLASSES);
-  const classEqr = new Float32Array(NUM_CLASSES);
-  const classHandEv = new Float32Array(NUM_CLASSES);
-  const seatW: Float32Array[] = Array.from({ length: P }, () => new Float32Array(NUM_CLASSES));
-  const combos: DecisionView["combos"] = [];
-  for (let h = 0; h < n; h++) {
-    const c = combo[h];
-    const cls = COMBO_CLASS[c];
-    let any = false;
-    const weights: number[] = [];
-    for (let q = 0; q < P; q++) {
-      const v = reach[q][h];
-      weights.push(v);
-      if (v > 0) {
-        any = true;
-        seatW[q][cls] += v;
-      }
-    }
-    if (rP[h] > 0) {
-      const w = rP[h] * M[h];
-      classWsum[cls] += w;
-      for (let a = 0; a < A; a++) {
-        classFreq[cls * A + a] += w * strategy[a * n + h];
-        classEv[cls * A + a] += w * ev[a * n + h];
-      }
-      classEquity[cls] += w * equity[h];
-      classEqr[cls] += w * (src.eqr ? src.eqr[h] : 0);
-      classHandEv[cls] += w * handEv[h];
-    }
-    if (any) {
-      const st: number[] = [];
-      const ea: number[] = [];
-      for (let a = 0; a < A; a++) {
-        st.push(strategy[a * n + h]);
-        ea.push(ev[a * n + h]);
-      }
-      combos.push({ combo: c, weight: rP[h], weights, strategy: st, ev: ea, equity: equity[h], eqr: src.eqr ? src.eqr[h] : 0, handEv: handEv[h] });
-    }
-  }
-  for (let cls = 0; cls < NUM_CLASSES; cls++) {
-    const ws = classWsum[cls];
-    if (ws > 0) {
-      for (let a = 0; a < A; a++) {
-        classFreq[cls * A + a] /= ws;
-        classEv[cls * A + a] /= ws;
-      }
-      classEquity[cls] /= ws;
-      classEqr[cls] /= ws;
-      classHandEv[cls] /= ws;
-    }
-    for (let q = 0; q < P; q++) seatW[q][cls] /= CLASS_COMBOS[cls].length;
-  }
-  return { kind: "decision", ...meta, classFreq, classEv, classWeightNorm: seatW[p], seatWeightNorm: seatW, classEquity, classEqr, classHandEv, combos, rangeEv, rangeEquity };
 }
 
 function nodeView(path: PathStep[]): NodeView {
@@ -318,7 +248,37 @@ self.onmessage = async (ev: MessageEvent<Envelope<Req>>) => {
         break;
       }
       case "node.view": {
-        post(id, { type: "result", data: nodeView(req.path) });
+        if (lib) {
+          const v = await lib.view(req.path, (it, expl) => post(id, { type: "progress", data: { iterations: it, exploitabilityPct: expl, elapsedMs: 0, ev: [], evOop: 0, evIp: 0, done: false } }));
+          post(id, { type: "result", data: v });
+        } else post(id, { type: "result", data: nodeView(req.path) });
+        break;
+      }
+      case "lib.analyze": {
+        const key = `${req.matchup}/${req.flop}`;
+        if (!lib || libKey !== key) {
+          hu = null;
+          mu = null;
+          lib = await LibSpot.load(req.baseUrl, req.matchup, req.flop);
+          libKey = key;
+        }
+        post(id, { type: "result", data: await lib.analyzeLine(req.heroSeat, req.heroCombo, req.items) });
+        break;
+      }
+      case "lib.runouts": {
+        if (!lib) throw new Error("라이브러리 스팟이 없습니다");
+        post(id, { type: "result", data: await lib.runouts(req.path) });
+        break;
+      }
+      case "lib.load": {
+        const key = `${req.matchup}/${req.flop}`;
+        if (!lib || libKey !== key) {
+          hu = null;
+          mu = null;
+          lib = await LibSpot.load(req.baseUrl, req.matchup, req.flop);
+          libKey = key;
+        }
+        post(id, { type: "result", data: { hands: lib.hands.n, meta: { ...lib.meta, hands: [], w0: [], w1: [] } } });
         break;
       }
       case "equity": {

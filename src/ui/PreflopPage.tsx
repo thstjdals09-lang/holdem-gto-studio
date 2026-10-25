@@ -93,7 +93,7 @@ export function PreflopPage() {
     const bbText = actorIsSb ? oppText : actorText;
     const pot = view.pot;
     const inv = Math.max(view.invested[0], view.invested[1]);
-    store.setPendingSolve({ oopText: bbText, ipText: sbText, pot, effStack: Math.max(1, stack - inv), note: `프리플랍 랩 ${labels.map((l) => l.label).join(" → ") || "루트"} 이후 (BB=OOP, SB=IP)` });
+    store.setPendingSolve({ players: 2, rangeTexts: [bbText, sbText], pot, effStack: Math.max(1, stack - inv), note: `프리플랍 랩 ${labels.map((l) => l.label).join(" → ") || "루트"} 이후 (BB=OOP, SB=IP)` });
     navigate("/solve");
   }
 

@@ -1,101 +1,115 @@
-import { useEffect, useState } from "react";
 import { useHashRoute } from "./common";
 import { SolvePage } from "./SolvePage";
 import { StudyPage } from "./StudyPage";
+import { MySolvesPage } from "./MySolvesPage";
 import { TrainerPage } from "./TrainerPage";
-import { PreflopPage } from "./PreflopPage";
 import { CalcPage } from "./CalcPage";
 import { RushPage } from "./RushPage";
-import { db } from "./db";
+import { ReportsPage } from "./ReportsPage";
+import { AnalyzePage } from "./AnalyzePage";
+import { PreflopPage } from "./PreflopPage";
 
-const NAV = [
-  ["/", "홈"],
+const NAV: Array<[string, string]> = [
   ["/study", "스터디"],
-  ["/solve", "커스텀 솔브"],
-  ["/trainer", "트레이너"],
-  ["/preflop", "프리플랍 랩"],
-  ["/calc", "계산기"],
-  ["/rush", "에퀴티 러시"]
-] as const;
+  ["/trainer", "연습"],
+  ["/analyze", "분석"],
+  ["/reports", "리포트"],
+  ["/solve", "솔버"],
+  ["/mysolves", "내 솔브"],
+  ["/calc", "도구"]
+];
 
 export function App() {
   const { path } = useHashRoute();
   return (
     <div className="app">
       <nav className="topnav">
-        <span className="brand">♠ 홀덤 GTO 스튜디오</span>
+        <a href="#/" className="brand">
+          ♠ 홀덤 GTO 스튜디오
+        </a>
         {NAV.map(([p, label]) => (
-          <a key={p} href={"#" + p} className={path === p ? "active" : ""}>
+          <a key={p} href={"#" + p} className={path === p || (p === "/calc" && (path === "/rush" || path === "/hu-preflop")) ? "active" : ""}>
             {label}
           </a>
         ))}
-        <span style={{ marginLeft: "auto" }} className="muted">
-          v0.1 · 브라우저 안에서 전부 계산 · 서버 없음
-        </span>
       </nav>
       {path === "/" && <HomePage />}
       {path === "/study" && <StudyPage />}
+      {path === "/mysolves" && <MySolvesPage />}
       {path === "/solve" && <SolvePage />}
       {path === "/trainer" && <TrainerPage />}
-      {path === "/preflop" && <PreflopPage />}
-      {path === "/calc" && <CalcPage />}
+      {path === "/analyze" && <AnalyzePage />}
+      {path === "/reports" && <ReportsPage />}
+      {path === "/calc" && <ToolsPage />}
       {path === "/rush" && <RushPage />}
+      {path === "/hu-preflop" && <PreflopPage />}
+      <footer className="foot muted small">브라우저 안에서 모든 계산이 이뤄집니다 · 근사 솔루션 포함 · 학습용</footer>
     </div>
   );
 }
 
+function ToolsPage() {
+  return (
+    <>
+      <div className="page" style={{ paddingBottom: 0 }}>
+        <div className="row">
+          <a href="#/calc" className="badge ok">
+            에퀴티 · ICM 계산기
+          </a>
+          <a href="#/rush" className="badge">
+            에퀴티 러시 (게임)
+          </a>
+          <a href="#/hu-preflop" className="badge">
+            HU 프리플랍 랩
+          </a>
+        </div>
+      </div>
+      <CalcPage />
+    </>
+  );
+}
+
 function HomePage() {
-  const [count, setCount] = useState<number | null>(null);
-  useEffect(() => {
-    db.listSpots().then((s) => setCount(s.length)).catch(() => setCount(0));
-  }, []);
   const go = (p: string) => (window.location.hash = p);
+  const cards: Array<[string, string, string]> = [
+    ["/study", "스터디", "미리 풀어둔 솔루션을 바로 탐색합니다. 6맥스 캐시·8맥스 토너먼트 프리플랍 전체 트리, 그리고 주요 매치업의 플랍·턴(리버는 즉석 재솔브)."],
+    ["/trainer", "연습", "프리플랍 오픈·대응 퀴즈, 그리고 미리 푼 스팟에서 GTO 상대와 핸드를 끝까지 플레이하며 결정마다 채점."],
+    ["/analyze", "분석", "핸드 히스토리를 붙여넣으면 프리플랍·포스트플랍 결정을 GTO와 비교해 정확/부정확/블런더와 EV 손실로 보여줍니다."],
+    ["/reports", "리포트", "매치업별로 모든 플랍의 첫 액션 빈도·EV·에퀴티를 보드 텍스처별로 집계합니다."],
+    ["/solve", "솔버", "원하는 보드·레인지·사이즈로 2~6인 포스트플랍을 직접 풉니다."],
+    ["/calc", "도구", "에퀴티 계산기, ICM·버블 팩터, 에퀴티 러시."]
+  ];
   return (
     <div className="page">
       <div className="home-hero">
         <h1>
-          내 손으로 돌리는 <span className="accent">홀덤 GTO 솔버</span>
+          홀덤 <span className="accent">GTO 스튜디오</span>
         </h1>
-        <p className="muted">서버도, 구독도 없습니다. 레인지와 보드를 넣으면 브라우저가 Discounted CFR로 균형 전략을 계산하고, 그 전략으로 스터디·트레이닝까지 이어집니다.</p>
+        <p className="muted">스터디 · 연습 · 분석을 한곳에서. 서버 없이 브라우저가 직접 계산합니다.</p>
         <div className="row" style={{ justifyContent: "center" }}>
-          <button className="primary" onClick={() => go("/solve")}>
-            첫 스팟 솔브하기
+          <button className="primary" onClick={() => go("/study")}>
+            스터디 시작
           </button>
-          <button onClick={() => go("/study")}>저장된 스팟 {count ?? "…"}개 보기</button>
+          <button onClick={() => go("/trainer")}>프리플랍 연습</button>
+          <button onClick={() => go("/analyze")}>내 핸드 분석</button>
         </div>
       </div>
       <div className="feature-cards">
-        <div className="card" onClick={() => go("/solve")}>
-          <h3>커스텀 솔브</h3>
-          <p>2~6인, 플랍·턴·리버 시작, 스트리트별 벳/레이즈 사이즈, 레이크, 올인 임계값, 동크 설정. 트리 크기와 메모리를 먼저 추정하고 빠름/표준/깊음 프리셋으로 멈춥니다.</p>
-        </div>
-        <div className="card" onClick={() => go("/study")}>
-          <h3>스터디</h3>
-          <p>13×13 그리드에 전략·EV·에퀴티·EQR을 겹쳐 보고, 액션 리본으로 트리를 오가며, 콤보 단위 빈도와 EV를 확인합니다. URL 하나로 스팟이 재현됩니다.</p>
-        </div>
-        <div className="card" onClick={() => go("/trainer")}>
-          <h3>트레이너 · 드릴</h3>
-          <p>솔브된 스팟에서 GTO 상대와 플레이. 정확/부정확/블런더와 EV 손실(팟 %)로 채점하고 스트리트·자리별 통계, 드릴 저장을 지원합니다.</p>
-        </div>
-        <div className="card" onClick={() => go("/preflop")}>
-          <h3>프리플랍 랩 (HU 근사)</h3>
-          <p>스택·오픈·3벳·4벳 사이즈를 정해 헤즈업 프리플랍 전략을 계산하고, 그 레인지를 그대로 포스트플랍 솔브로 넘깁니다.</p>
-        </div>
-        <div className="card" onClick={() => go("/calc")}>
-          <h3>에퀴티 · ICM 계산기</h3>
-          <p>레인지 vs 레인지 에퀴티(핸드별 히트맵), Malmuth-Harville ICM과 버블 팩터 행렬.</p>
-        </div>
-        <div className="card" onClick={() => go("/rush")}>
-          <h3>에퀴티 러시</h3>
-          <p>15초 안에 핸드 에퀴티를 맞히는 감각 훈련 게임.</p>
-        </div>
+        {cards.map(([p, t, d]) => (
+          <div key={p} className="card" onClick={() => go(p)}>
+            <h3>{t}</h3>
+            <p className="small" style={{ margin: 0 }}>
+              {d}
+            </p>
+          </div>
+        ))}
       </div>
       <div className="card" style={{ marginTop: 14 }}>
-        <h3>엔진</h3>
-        <ul style={{ margin: 0, paddingLeft: 18 }} className="muted">
-          <li>2~6인 포스트플랍 Discounted CFR(α=1.5, β=0, γ=2), 교대 업데이트, 1326 콤보 벡터화. 3인까지는 상대 두 명의 카드 충돌을 포함-배제로 정확히 계산, 4인 이상은 상대 간 겹침을 무시하는 근사</li>
-          <li>익스플로잇어빌리티 = 양쪽 최적 응답 이득의 평균(팟 %). 리버 clairvoyance 이론값(블러프 1/3, MDF 50%) 검증 통과</li>
-          <li>모든 계산은 Web Worker에서 실행, 결과는 이 기기의 IndexedDB에만 저장</li>
+        <h3>솔루션에 대해</h3>
+        <ul className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
+          <li>포스트플랍: 헤즈업 Discounted CFR로 푼 단일 사이즈 트리(플랍 33%·체크레이즈, 턴 66%, 리버 75%). 플랍당 익스플로잇어빌리티 약 0.2~0.3%(팟 대비).</li>
+          <li>프리플랍: 6~8인 전체 트리를 169 핸드 클래스로 풀되, 플랍 이후 가치는 에퀴티×실현계수로 근사합니다. 실제 포스트플랍 플레이를 푼 상용 솔루션과 차이가 있습니다.</li>
+          <li>라이브러리에 없는 보드·라인은 솔버 메뉴에서 직접 풀 수 있습니다.</li>
         </ul>
       </div>
     </div>

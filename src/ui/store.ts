@@ -2,10 +2,12 @@
 import type { TreeConfig } from "../engine/tree";
 
 export interface PendingSolve {
-  oopText: string;
-  ipText: string;
+  players: number;
+  rangeTexts: string[]; // 포스트플랍 행동 순서
+  seatNames?: string[];
   pot: number;
   effStack: number;
+  board?: string;
   note: string;
 }
 

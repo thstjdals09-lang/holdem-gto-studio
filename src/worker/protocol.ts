@@ -68,7 +68,7 @@ export interface TerminalView {
   winner: number; // fold 터미널 승자, 아니면 -1
   shares: number[]; // 플레이어별 기대 팟 지분
 }
-export type NodeView = DecisionView | ChanceView | TerminalView;
+export type NodeView = (DecisionView | ChanceView | TerminalView) & { river?: { iterations: number; exploitabilityPct: number } };
 
 export interface SolveProgress {
   iterations: number;
@@ -106,6 +106,9 @@ export type Req =
   | ({ type: "spot.load"; strategy: Float32Array; iterations: number } & SpotInput)
   | { type: "spot.export" }
   | { type: "node.view"; path: PathStep[] }
+  | { type: "lib.load"; baseUrl: string; matchup: string; flop: string }
+  | { type: "lib.runouts"; path: PathStep[] }
+  | { type: "lib.analyze"; baseUrl: string; matchup: string; flop: string; heroSeat: 0 | 1; heroCombo: number; items: Array<{ kind: "card"; card: number } | { kind: "action"; actor: 0 | 1; type: "fold" | "check" | "call" | "bet" | "raise"; amount: number; allin: boolean }> }
   | { type: "equity"; oop: Float32Array; ip: Float32Array; board: number[]; samples: number }
   | { type: "handVsHand"; h0: [number, number]; h1: [number, number]; board: number[]; samples: number }
   | { type: "preflop.matrix"; samplesPerPair: number }
