@@ -24,6 +24,10 @@ GTO Wizard처럼 **미리 풀어둔 솔루션을 바로 탐색**하고, 그 솔�
 
 플랍·턴 노드는 콤보별 전략(1바이트)과 EV(2바이트)로 저장되고, 리버는 브라우저가 그 지점 레인지로 리버 서브게임을 재솔브합니다(`src/worker/libspot.ts`).
 
+## 솔버 SDK (공유용)
+
+`sdk/`는 이 엔진을 다른 앱에 넣어 쓰는 독립 패키지(holdem-gto-solver)입니다. 라이브러리 조회, 핸드 분석, 병렬 커스텀 솔브, 노드 잠금, 저장·불러오기를 API로 제공합니다. `npm run sdk:build`로 빌드하고 `npm run sdk:pack`으로 `release/holdem-gto-solver-<버전>.tgz`를 만듭니다. 배포본은 비공개 저장소 `thstjdals09-lang/gto-solver-sdk`의 릴리스에 있습니다. 사용법은 `sdk/README.md`, `sdk/API.md`, `sdk/DATA.md`를 보세요.
+
 ## 생성
 
 ```bash
