@@ -96,7 +96,16 @@ export class PostflopSolver {
   readonly remaining: number[]; // 시작 보드에 없는 카드
   readonly cardIdx: Int8Array; // 카드 → 런아웃 인덱스
   readonly R: number;
-  readonly mult: Int32Array; // 결정 노드별 런아웃 배수 (1, R, R*R)
+  readonly mult: Int32Array; // 결정 노드별 런아웃 배수 (1, R1, R1*R)
+  /** 병렬용: 첫 런아웃 카드 인덱스 → 이 솔버의 로컬 슬롯 (-1 = 맡지 않음). null 이면 전부 맡음 */
+  readonly firstLocal: Int16Array | null;
+  /** 첫 런아웃 단계에서 이 솔버가 맡은 카드 수 (전부면 R) */
+  readonly R1: number;
+  private level: Int8Array; // 결정 노드의 런아웃 단계 0/1/2
+  /** 병렬 조정자용: 첫 찬스 단계에서 하위 트리 대신 호출된다 */
+  chanceHook: ((ch: ChanceNode, p: 0 | 1, rP: Float32Array | null, rO: Float32Array, out: Float32Array, mode: "train" | "avg" | "br") => void) | null = null;
+  /** true 면 학습 순회에서 후회·전략 누적을 갱신하지 않는다 (병렬 조정자의 수집 단계) */
+  dry = false;
   regret: Float32Array[];
   stratSum: Float32Array[];
   private pool: Float32Array[][] = [];
@@ -108,7 +117,11 @@ export class PostflopSolver {
   private cumCard = new Float64Array(52);
   private sortBuf: Int32Array;
 
-  constructor(tree: GameTree, w0: RangeWeights, w1: RangeWeights) {
+  /**
+   * @param opts.firstCards 병렬 하위 솔버용: 첫 런아웃(플랍 시작이면 턴) 카드 중 이 솔버가 맡을 카드.
+   *   주면 그 카드의 하위 트리만 메모리를 잡고 chancePartial 로만 순회한다. 빈 배열이면 첫 스트리트만 (조정자).
+   */
+  constructor(tree: GameTree, w0: RangeWeights, w1: RangeWeights, opts?: { firstCards?: number[] }) {
     this.tree = tree;
     const board = tree.config.board;
     this.hands = buildHandSet(board, w0, w1);
@@ -132,13 +145,26 @@ export class PostflopSolver {
     }
     this.R = this.remaining.length;
     const start = tree.startStreet;
+    if (opts?.firstCards) {
+      const fl = new Int16Array(this.R).fill(-1);
+      opts.firstCards.forEach((c, k) => {
+        if (this.cardIdx[c] < 0) throw new Error("보드에 있는 카드는 맡을 수 없습니다");
+        fl[this.cardIdx[c]] = k;
+      });
+      this.firstLocal = fl;
+      this.R1 = opts.firstCards.length;
+    } else {
+      this.firstLocal = null;
+      this.R1 = this.R;
+    }
     this.mult = new Int32Array(tree.decisionNodes.length);
+    this.level = new Int8Array(tree.decisionNodes.length);
     this.regret = [];
     this.stratSum = [];
     for (const d of tree.decisionNodes) {
-      let m = 1;
-      if (d.street > start) m *= this.R;
-      if (d.street > start + 1) m *= this.R;
+      const lv = Math.max(0, Math.min(2, d.street - start));
+      this.level[d.id] = lv;
+      const m = lv === 0 ? 1 : lv === 1 ? this.R1 : this.R1 * this.R;
       this.mult[d.id] = m;
       const size = m * d.actions.length * n;
       this.regret.push(new Float32Array(size));
@@ -320,38 +346,117 @@ export class PostflopSolver {
 
   // ---------- 런아웃 오프셋 ----------
   private offset(d: DecisionNode, ctx: Ctx): number {
-    const m = this.mult[d.id];
-    if (m === 1) return 0;
+    const lv = this.level[d.id];
+    if (lv === 0) return 0;
     const A = d.actions.length * this.hands.n;
-    if (m === this.R) return ctx.tIdx * A;
-    return (ctx.tIdx * this.R + ctx.rIdx) * A;
+    const t = this.firstLocal ? this.firstLocal[ctx.tIdx] : ctx.tIdx;
+    if (t < 0) throw new Error("이 솔버가 맡지 않은 런아웃입니다");
+    if (lv === 1) return t * A;
+    return (t * this.R + ctx.rIdx) * A;
   }
 
+  private sumBuf: Float64Array | null = null;
+  /** 후회 매칭. 액션 바깥·핸드 안쪽 순서로 연속 메모리를 읽는다 (핸드별 덧셈 순서는 액션 0..A−1 로 동일) */
   private regretMatch(reg: Float32Array, off: number, A: number, sigma: Float32Array): void {
     const n = this.hands.n;
-    for (let h = 0; h < n; h++) {
-      let sum = 0;
-      for (let a = 0; a < A; a++) {
-        const r = reg[off + a * n + h];
-        if (r > 0) sum += r;
+    let sum = this.sumBuf;
+    if (!sum || sum.length < n) sum = this.sumBuf = new Float64Array(n);
+    // 원래 구현은 float64 누산 (let sum = 0) 이므로 Float64Array 로 같은 결과를 낸다
+    sum.fill(0, 0, n);
+    for (let a = 0; a < A; a++) {
+      const base = off + a * n;
+      for (let h = 0; h < n; h++) {
+        const r = reg[base + h];
+        if (r > 0) sum[h] += r;
       }
-      if (sum > 0) {
-        for (let a = 0; a < A; a++) {
-          const r = reg[off + a * n + h];
-          sigma[a * n + h] = r > 0 ? r / sum : 0;
-        }
-      } else {
-        const u = 1 / A;
-        for (let a = 0; a < A; a++) sigma[a * n + h] = u;
+    }
+    const u = 1 / A;
+    for (let a = 0; a < A; a++) {
+      const base = off + a * n;
+      const sb = a * n;
+      for (let h = 0; h < n; h++) {
+        const sm = sum[h];
+        if (sm > 0) {
+          const r = reg[base + h];
+          sigma[sb + h] = r > 0 ? r / sm : 0;
+        } else sigma[sb + h] = u;
       }
     }
   }
 
-  /** 평균 전략 (정규화) */
+  // ---------- 노드 잠금 ----------
+  /** 결정 노드 id → (런아웃 인덱스, -1 = 모든 런아웃) → 슬롯 기준 전략 A·n */
+  private locks = new Map<number, Map<number, Float32Array>>();
+
+  private lockOf(d: DecisionNode, off: number): Float32Array | null {
+    const m = this.locks.get(d.id);
+    if (!m) return null;
+    const k = off / (d.actions.length * this.hands.n);
+    return m.get(k) ?? m.get(-1) ?? null;
+  }
+
+  /**
+   * 경로가 가리키는 결정 노드의 전략을 고정한다 (노드 잠금).
+   * strategy: 슬롯 기준 A·n (액션 a, 핸드 h → a·n + h), 핸드마다 합이 1이 되도록 정규화된다.
+   * allRunouts: true면 같은 결정 노드의 모든 턴·리버 카드에 적용, false면 경로의 카드에만.
+   * 잠금 뒤에는 step()을 더 돌려야 나머지 전략이 잠금에 맞춰 바뀐다.
+   */
+  lockNode(path: PathStep[], strategy: Float32Array, allRunouts = false): void {
+    const { node, ctx } = this.walk(path);
+    if (node.kind !== "decision") throw new Error("결정 노드만 잠글 수 있습니다");
+    const A = node.actions.length;
+    const n = this.hands.n;
+    if (strategy.length !== A * n) throw new Error(`전략 길이는 액션 수×핸드 수(${A * n})여야 합니다`);
+    const s = new Float32Array(A * n);
+    for (let h = 0; h < n; h++) {
+      let sum = 0;
+      for (let a = 0; a < A; a++) sum += Math.max(0, strategy[a * n + h]);
+      for (let a = 0; a < A; a++) s[a * n + h] = sum > 0 ? Math.max(0, strategy[a * n + h]) / sum : 1 / A;
+    }
+    const key = allRunouts ? -1 : this.offset(node, ctx) / (A * n);
+    let m = this.locks.get(node.id);
+    if (!m) {
+      m = new Map();
+      this.locks.set(node.id, m);
+    }
+    m.set(key, s);
+  }
+
+  /** 잠금 해제. allRunouts는 lockNode 때와 같은 값을 준다 */
+  unlockNode(path: PathStep[], allRunouts = false): boolean {
+    const { node, ctx } = this.walk(path);
+    if (node.kind !== "decision") return false;
+    const m = this.locks.get(node.id);
+    if (!m) return false;
+    const ok = m.delete(allRunouts ? -1 : this.offset(node, ctx) / (node.actions.length * this.hands.n));
+    if (m.size === 0) this.locks.delete(node.id);
+    return ok;
+  }
+
+  clearLocks(): void {
+    this.locks.clear();
+  }
+
+  /** 잠긴 노드 수 (런아웃별 잠금 포함) */
+  get lockCount(): number {
+    let c = 0;
+    for (const m of this.locks.values()) c += m.size;
+    return c;
+  }
+
+  /** 평균 전략 (정규화). 잠긴 노드는 고정 전략 */
   avgStrategy(d: DecisionNode, ctx: Ctx, out?: Float32Array): Float32Array {
     const n = this.hands.n;
     const A = d.actions.length;
     const off = this.offset(d, ctx);
+    if (this.locks.size) {
+      const lk = this.lockOf(d, off);
+      if (lk) {
+        const res = out ?? new Float32Array(A * n);
+        res.set(lk);
+        return res;
+      }
+    }
     const ss = this.stratSum[d.id];
     const res = out ?? new Float32Array(A * n);
     for (let h = 0; h < n; h++) {
@@ -374,6 +479,10 @@ export class PostflopSolver {
       return;
     }
     if (node.kind === "chance") {
+      if (this.chanceHook && node.street - this.tree.startStreet === 1) {
+        this.chanceHook(node, p, rP, rO, out, "train");
+        return;
+      }
       out.fill(0);
       const tmp = this.buf(depth, 0);
       const rP2 = this.buf(depth, 1);
@@ -412,6 +521,8 @@ export class PostflopSolver {
     const sigmaFull = this.sigmaBuf(depth, A);
     this.regretMatch(this.regret[d.id], off, A, sigmaFull);
     void sigma;
+    const locked = this.locks.size ? this.lockOf(d, off) : null;
+    if (locked) sigmaFull.set(locked);
     if (d.player === p) {
       const outs: Float32Array[] = [];
       const rP2 = this.buf(depth, 1);
@@ -426,6 +537,7 @@ export class PostflopSolver {
         const oa = outs[a];
         for (let h = 0; h < n; h++) out[h] += sigmaFull[a * n + h] * oa[h];
       }
+      if (locked || this.dry) return; // 잠긴 노드·수집 단계는 후회·전략 누적을 갱신하지 않는다
       // DCFR 업데이트
       const t = this.t;
       const posD = Math.pow(t, ALPHA) / (Math.pow(t, ALPHA) + 1);
@@ -486,6 +598,7 @@ export class PostflopSolver {
 
   /** n회 반복 (각 반복 = 양 플레이어 교대 업데이트) */
   step(iters: number): void {
+    if (this.firstLocal) throw new Error("부분 솔버는 병렬 조정자를 통해서만 반복합니다");
     const t0 = performance.now();
     const n = this.hands.n;
     const out = new Float32Array(n);
@@ -511,6 +624,10 @@ export class PostflopSolver {
       return;
     }
     if (node.kind === "chance") {
+      if (this.chanceHook && node.street - this.tree.startStreet === 1) {
+        this.chanceHook(node, p, null, rO, out, mode);
+        return;
+      }
       out.fill(0);
       const tmp = this.buf(depth, 0);
       const rO2 = this.buf(depth, 2);
@@ -542,7 +659,8 @@ export class PostflopSolver {
     this.avgStrategy(d, ctx, sigma);
     if (d.player === p) {
       const tmp = this.buf(depth, 2);
-      if (mode === "br") out.fill(-Infinity);
+      const brHere = mode === "br" && !(this.locks.size && this.lockOf(d, this.offset(d, ctx)));
+      if (brHere) out.fill(-Infinity);
       else out.fill(0);
       const rec = mode === "avg" && this.evRec && d.street <= this.evMaxStreet ? this.evRec[d.id] : null;
       let Sx: Float32Array | null = null;
@@ -558,7 +676,7 @@ export class PostflopSolver {
           const base = recOff + a * n;
           for (let h = 0; h < n; h++) rec[base + h] = Sx[h] > 0 ? tmp[h] / Sx[h] + d.invested[p] : 0;
         }
-        if (mode === "br") {
+        if (brHere) {
           for (let h = 0; h < n; h++) if (tmp[h] > out[h]) out[h] = tmp[h];
         } else {
           for (let h = 0; h < n; h++) out[h] += sigma[a * n + h] * tmp[h];
@@ -585,6 +703,142 @@ export class PostflopSolver {
     const w = this.w[p];
     for (let h = 0; h < n; h++) if (w[h] > 0 && isFinite(out[h])) v += w[h] * out[h];
     return this.Z > 0 ? v / this.Z : 0;
+  }
+
+  // ---------- 병렬 지원 ----------
+  /** 조정자용: 반복 t 에서 플레이어 p 의 학습 순회 1회 (첫 찬스 단계는 chanceHook 으로) */
+  trainRoot(p: 0 | 1, t: number): void {
+    this.t = t;
+    const out = new Float32Array(this.hands.n);
+    this.traverse(this.tree.root, 0, this.rootCtx(), p, this.w[p], this.w[p === 0 ? 1 : 0], out);
+  }
+
+  /** 조정자용: 반복 1회가 끝났음을 기록 */
+  finishIteration(ms = 0): void {
+    this.iterations++;
+    this.elapsedMs += ms;
+  }
+
+  /** 조정자용: 루트 가치 (rootValue 와 같은 정규화) */
+  evalRoot(p: 0 | 1, mode: "br" | "avg"): number {
+    return this.rootValue(p, mode);
+  }
+
+  /** 첫 찬스 노드의 정규화 분모 (유효 카드 수 − 4) */
+  chanceDenominator(ch: ChanceNode): number {
+    const inBoard = new Set(this.tree.config.board);
+    let count = 0;
+    for (const c of this.remaining) if (!inBoard.has(c) && ch.children[c]) count++;
+    return count > 4 ? count - 4 : 1;
+  }
+
+  /**
+   * 하위 솔버용: 첫 찬스 노드 chIdx 에서 맡은 카드들의 CFV 합 (정규화 전).
+   * mode 'train' 이면 그 하위 트리를 반복 t 로 학습한다.
+   */
+  chancePartial(chIdx: number, p: 0 | 1, rP: Float32Array | null, rO: Float32Array, mode: "train" | "avg" | "br", t: number): Float32Array {
+    const node = this.tree.chanceNodes[chIdx];
+    if (!node || node.street - this.tree.startStreet !== 1) throw new Error("첫 찬스 노드가 아닙니다");
+    const n = this.hands.n;
+    const out = new Float32Array(n);
+    const tmp = new Float32Array(n);
+    const rP2 = new Float32Array(n);
+    const rO2 = new Float32Array(n);
+    const ctx0 = this.rootCtx();
+    if (mode === "train") this.t = t;
+    for (const c of this.remaining) {
+      const child = node.children[c];
+      if (!child) continue;
+      if (this.firstLocal && this.firstLocal[this.cardIdx[c]] < 0) continue;
+      rO2.set(rO);
+      if (rP) rP2.set(rP);
+      const hw = this.hands.handsWithCard[c];
+      for (let k = 0; k < hw.length; k++) {
+        rO2[hw[k]] = 0;
+        rP2[hw[k]] = 0;
+      }
+      const ctx2 = this.nextCtx(ctx0, node, c);
+      if (mode === "train") this.traverse(child, 1, ctx2, p, rP2, rO2, tmp);
+      else this.evalTraverse(child, 1, ctx2, p, rO2, mode, tmp);
+      for (let h = 0; h < n; h++) out[h] += tmp[h];
+      for (let k = 0; k < hw.length; k++) out[hw[k]] -= tmp[hw[k]];
+    }
+    return out;
+  }
+
+  /** 하위 솔버용: 첫 찬스 노드에서 card 를 딜한 뒤, 주어진 reach 로 나머지 경로를 따라간다 */
+  walkFrom(chIdx: number, card: number, r0in: Float32Array, r1in: Float32Array, rest: PathStep[]): { node: TreeNode; ctx: Ctx; reach: [Float32Array, Float32Array] } {
+    const n = this.hands.n;
+    const ch = this.tree.chanceNodes[chIdx];
+    const child = ch?.children[card];
+    if (!child) throw new Error("사용할 수 없는 카드");
+    const r0 = new Float32Array(r0in);
+    const r1 = new Float32Array(r1in);
+    const hw = this.hands.handsWithCard[card];
+    for (let k = 0; k < hw.length; k++) {
+      r0[hw[k]] = 0;
+      r1[hw[k]] = 0;
+    }
+    let ctx = this.nextCtx(this.rootCtx(), ch, card);
+    let node: TreeNode = child;
+    for (const step of rest) {
+      if (node.kind === "decision" && step.kind === "action") {
+        const sigma = this.avgStrategy(node, ctx);
+        const r = node.player === 0 ? r0 : r1;
+        for (let h = 0; h < n; h++) r[h] *= sigma[step.index * n + h];
+        node = node.children[step.index];
+      } else if (node.kind === "chance" && step.kind === "card") {
+        const c = step.card;
+        const nx = node.children[c];
+        if (!nx || ctx.board.includes(c)) throw new Error("사용할 수 없는 카드");
+        const hw2 = this.hands.handsWithCard[c];
+        for (let k = 0; k < hw2.length; k++) {
+          r0[hw2[k]] = 0;
+          r1[hw2[k]] = 0;
+        }
+        ctx = this.nextCtx(ctx, node, c);
+        node = nx;
+      } else throw new Error("경로가 트리와 맞지 않습니다");
+    }
+    return { node, ctx, reach: [r0, r1] };
+  }
+
+  /** 하위 솔버용: walkFrom 위치의 결정 노드를 잠그거나(unlock=false) 푼다 */
+  lockAt(chIdx: number, card: number, rest: PathStep[], strategy: Float32Array | null, allRunouts: boolean, unlock = false): boolean {
+    const z = new Float32Array(this.hands.n);
+    const { node, ctx } = this.walkFrom(chIdx, card, z, z, rest);
+    if (node.kind !== "decision") throw new Error("결정 노드만 잠글 수 있습니다");
+    const A = node.actions.length;
+    const n = this.hands.n;
+    const key = allRunouts ? -1 : this.offset(node, ctx) / (A * n);
+    let m = this.locks.get(node.id);
+    if (unlock) {
+      if (!m) return false;
+      const ok = m.delete(key);
+      if (m.size === 0) this.locks.delete(node.id);
+      return ok;
+    }
+    if (!strategy || strategy.length !== A * n) throw new Error(`전략 길이는 액션 수×핸드 수(${A * n})여야 합니다`);
+    const s2 = new Float32Array(A * n);
+    for (let h = 0; h < n; h++) {
+      let sum = 0;
+      for (let a = 0; a < A; a++) sum += Math.max(0, strategy[a * n + h]);
+      for (let a = 0; a < A; a++) s2[a * n + h] = sum > 0 ? Math.max(0, strategy[a * n + h]) / sum : 1 / A;
+    }
+    if (!m) {
+      m = new Map();
+      this.locks.set(node.id, m);
+    }
+    m.set(key, s2);
+    return true;
+  }
+
+  /** 맡은 첫 런아웃 카드 목록 (전부면 null) */
+  get ownedFirstCards(): number[] | null {
+    if (!this.firstLocal) return null;
+    const out: number[] = new Array(this.R1);
+    for (let t = 0; t < this.R; t++) if (this.firstLocal[t] >= 0) out[this.firstLocal[t]] = this.remaining[t];
+    return out;
   }
 
   /** 루트에서 플레이어 p의 핸드별 EV(평균 전략, 루트 기준 순이익)와 에퀴티 — 실현율 측정용 */
