@@ -261,7 +261,9 @@ export class PostflopSolver {
   }
 
   private foldCFV(t: TerminalNode, p: 0 | 1, ro: Float32Array, out: Float32Array): void {
-    const potPrime = this.rakedPot(t.pot);
+    // 레이크는 콜된 부분에만: 콜되지 않은 벳은 그대로 돌려받는다
+    const unc = Math.abs(t.invested[0] - t.invested[1]);
+    const potPrime = this.rakedPot(t.pot - unc) + unc;
     const u = t.folder === p ? -t.invested[p] : potPrime - t.invested[p];
     this.fillS(ro, out);
     const n = this.hands.n;
@@ -582,7 +584,22 @@ export class PostflopSolver {
     let v = 0;
     const w = this.w[p];
     for (let h = 0; h < n; h++) if (w[h] > 0 && isFinite(out[h])) v += w[h] * out[h];
-    return v / this.Z;
+    return this.Z > 0 ? v / this.Z : 0;
+  }
+
+  /** 루트에서 플레이어 p의 핸드별 EV(평균 전략, 루트 기준 순이익)와 에퀴티 — 실현율 측정용 */
+  rootHandStats(p: 0 | 1): { ev: Float32Array; S: Float32Array; equity: Float32Array } {
+    const n = this.hands.n;
+    const out = new Float32Array(n);
+    const rO = this.w[p === 0 ? 1 : 0];
+    const ctx = this.rootCtx();
+    this.evalTraverse(this.tree.root, 0, ctx, p, rO, "avg", out);
+    this.computeTotals(rO);
+    const S = new Float32Array(n);
+    this.fillS(rO, S);
+    const ev = new Float32Array(n);
+    for (let h = 0; h < n; h++) ev[h] = S[h] > 0 ? out[h] / S[h] : 0;
+    return { ev, S, equity: this.equityVector(ctx, rO) };
   }
 
   metrics(): SolverMetrics {
@@ -643,8 +660,9 @@ export class PostflopSolver {
     const runouts: number[][] = [];
     const need = 5 - ctx.board.length;
     if (need === 0) runouts.push([]);
-    else if (need === 1) for (const c of this.remaining) if (!inBoard.has(c)) runouts.push([c]);
-    else {
+    else if (need === 1) {
+      for (const c of this.remaining) if (!inBoard.has(c)) runouts.push([c]);
+    } else {
       const live = this.remaining.filter((c) => !inBoard.has(c));
       for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) runouts.push([live[i], live[j]]);
     }
@@ -695,9 +713,8 @@ export class PostflopSolver {
     const eqr = new Float32Array(n);
     const pot = d.pot;
     for (let h = 0; h < n; h++) {
-      // 팟 지분 = EV(여기서부터) + 이미 넣은 돈... 지분 관점: share = handEv + 미래 투자 기대. 간이식: (handEv + invested) / (eq*pot)
-      const share = handEv[h] + d.invested[p];
-      eqr[h] = equity[h] > 1e-6 && pot > 0 ? share / (equity[h] * pot) : 0;
+      // handEv는 "여기서부터" EV(폴드=0, 체크다운 승리=팟)이므로 EQR = EV / (에퀴티 × 팟)
+      eqr[h] = equity[h] > 1e-6 && pot > 0 ? handEv[h] / (equity[h] * pot) : 0;
     }
     const actionFreq: number[] = [];
     const actionEv: number[] = [];

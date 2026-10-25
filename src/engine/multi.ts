@@ -554,7 +554,17 @@ export class MultiSolver {
 
   /** 폴드 터미널 */
   private foldCFV(t: MTerminal, p: number, r: Float32Array[], out: Float32Array): void {
-    const potPrime = this.rakedPot(t.pot);
+    // 레이크는 콜된 부분에만: 가장 큰 투자액과 두 번째 투자액의 차이는 돌려받는다
+    let hi = 0;
+    let hi2 = 0;
+    for (const x of t.invested) {
+      if (x > hi) {
+        hi2 = hi;
+        hi = x;
+      } else if (x > hi2) hi2 = x;
+    }
+    const unc = hi - hi2;
+    const potPrime = this.rakedPot(t.pot - unc) + unc;
     const u = t.winner === p ? potPrime - t.invested[p] : -t.invested[p];
     this.massVector(p, r, out);
     for (let h = 0; h < this.n; h++) out[h] *= u;
@@ -1077,8 +1087,9 @@ export class MultiSolver {
     const need = 5 - ctx.board.length;
     const runouts: number[][] = [];
     if (need === 0) runouts.push([]);
-    else if (need === 1) for (const c of this.remaining) if (!inBoard.has(c)) runouts.push([c]);
-    else {
+    else if (need === 1) {
+      for (const c of this.remaining) if (!inBoard.has(c)) runouts.push([c]);
+    } else {
       const live = this.remaining.filter((c) => !inBoard.has(c));
       for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) runouts.push([live[i], live[j]]);
     }

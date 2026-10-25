@@ -147,7 +147,9 @@ export function analyzePreflop(h: ParsedHand, lib: PfLib, flopsOf: (matchupId: s
         if (ai < 0) ai = node.a.findIndex((x) => x[0] === "check");
       } else {
         hhAct = acts.splice(k, 1)[0];
-        ai = mapPreflopAction(node, hhAct, (heroSeat?.stack ?? 100));
+        // 올인 판정은 행동한 플레이어 자신의 스택 기준
+        const actorStack = h.seats.find((s) => s.name === player)?.stack ?? lib.format.stack;
+        ai = mapPreflopAction(node, hhAct, actorStack);
       }
     }
     if (ai < 0) {
@@ -190,7 +192,9 @@ export function analyzePreflop(h: ParsedHand, lib: PfLib, flopsOf: (matchupId: s
   let libFlop: string | null = null;
   if (inTree && !node) {
     matchup = MATCHUPS.find((m) => m.format === lib.format.id && m.codes.length === codes.length && m.codes.every((c, i) => c === codes[i])) ?? null;
-    if (matchup && h.board.length >= 3 && h.hero && [matchup.oop, matchup.ip].includes(heroSeat?.position ?? "")) {
+    // 라이브러리 자리 이름으로 비교 (헤즈업 버튼 = 라이브러리 SB 등 테이블 인원 차이 보정)
+    const heroLibPos = h.hero && seatOf.has(h.hero) ? lib.format.positions[seatOf.get(h.hero)!] : "";
+    if (matchup && h.board.length >= 3 && h.hero && [matchup.oop, matchup.ip].includes(heroLibPos)) {
       const mf = matchFlop(h.board.slice(0, 3), flopsOf(matchup.id));
       libFlop = mf ? mf.flop : null;
       if (!libFlop) note = "이 플랍(수트 대칭 포함)은 라이브러리에 없습니다";
@@ -223,4 +227,26 @@ export function analyzePreflop(h: ParsedHand, lib: PfLib, flopsOf: (matchupId: s
 export function heroClassLabel(h: ParsedHand): string {
   if (!h.heroCards) return "";
   return classLabel(COMBO_CLASS[comboIndex(h.heroCards[0], h.heroCards[1])]);
+}
+
+/** 핸드에 맞는 프리플랍 라이브러리 포맷. 토너먼트는 유효 스택(히어로와 가장 큰 상대 스택 중 작은 값)에 가장 가까운 깊이 */
+export function pickFormat(h: ParsedHand, ids: string[]): string {
+  const first = h.raw.split("\n")[0] ?? "";
+  const isMtt = /Tournament/i.test(first) || h.raw.includes("posts the ante") || h.seats.length > 6;
+  if (!isMtt) return ids.includes("cash6-100") ? "cash6-100" : ids[0];
+  const hero = h.seats.find((s) => s.name === h.hero);
+  const others = h.seats.filter((s) => s.name !== h.hero).map((s) => s.stack);
+  const eff = hero && others.length ? Math.min(hero.stack, Math.max(...others)) : 40;
+  let best = ids.find((id) => id.startsWith("mtt")) ?? ids[0];
+  let bd = Infinity;
+  for (const id of ids) {
+    const m = id.match(/^mtt\d+-(\d+)$/);
+    if (!m) continue;
+    const d = Math.abs(Math.log(Math.max(1, eff) / Number(m[1])));
+    if (d < bd) {
+      bd = d;
+      best = id;
+    }
+  }
+  return best;
 }

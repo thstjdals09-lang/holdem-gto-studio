@@ -290,6 +290,23 @@ export function TrainerPage() {
   }, [hand?.finished]);
 
   const dv = hand?.view && hand.view.kind === "decision" ? (hand.view as DecisionView) : null;
+  useEffect(() => {
+    if (tab !== "play") return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const k = Number(e.key);
+      if (dv && !hand?.finished && !busy && k >= 1 && k <= dv.actions.length) {
+        e.preventDefault();
+        act(k - 1);
+      } else if ((e.key === "Enter" || e.key === " ") && !busy && (!hand || hand.finished)) {
+        e.preventDefault();
+        deal();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   const colors = dv ? actionColors(dv.actions) : [];
   const heroCards = hand ? COMBO_CARDS[hand.combos[hand.heroSeat]] : null;
   const activeNow = hand?.view && hand.view.kind !== "chance" ? hand.view.active : hand?.view?.active;
@@ -468,6 +485,7 @@ export function TrainerPage() {
                     <div className="row">
                       {dv.actions.map((a, i) => (
                         <button key={i} className="primary" style={{ background: colors[i], color: "#fff" }} disabled={busy} onClick={() => act(i)}>
+                          <span className="kbd" style={{ marginRight: 6, color: "#fff", borderColor: "rgba(255,255,255,.5)" }}>{i + 1}</span>
                           {a.label}
                         </button>
                       ))}

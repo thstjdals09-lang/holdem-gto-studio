@@ -12,7 +12,7 @@ const m = MATCHUPS.find((x) => x.id === mid);
 if (!m) throw new Error("matchup?");
 const shard = Number(kArg ?? 0);
 const shards = Number(KArg ?? 1);
-const small = m.id !== "btn-bb-srp" && m.kind === "srp";
+const small = m.flopSet === "small";
 const maxIters = small ? Math.min(Number(itArg ?? 100), 80) : Number(itArg ?? 100);
 const target = small ? Math.max(Number(tgArg ?? 0.2), 0.3) : Number(tgArg ?? 0.2);
 const lib: PfLib = JSON.parse(readFileSync(`public/lib/preflop/${m.format}.json`, "utf-8"));

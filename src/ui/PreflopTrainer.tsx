@@ -3,7 +3,7 @@ import { CLASS_COMBOS, COMBO_CARDS, NUM_CLASSES, classLabel } from "../engine/ca
 import { CLASS_N, walkIdx, type PfLib, type PfLibNode } from "../lib/preflopLib";
 import { PlayingCard, Spinner } from "./common";
 import { actionColors, bb, pct } from "./format";
-import { FORMAT_LIST, loadPreflop } from "./lib";
+import { DEFAULT_FORMAT, FORMAT_LIST, loadPreflop } from "./lib";
 import { db, newId, type TrainerRecord } from "./db";
 
 type Scenario = "rfi" | "vsOpen" | "vs3bet" | "all";
@@ -69,7 +69,7 @@ function pick<T>(items: T[], weight: (x: T) => number): T | null {
 }
 
 export function PreflopTrainer() {
-  const [fmt, setFmt] = useState("cash6-100");
+  const [fmt, setFmt] = useState(DEFAULT_FORMAT);
   const [lib, setLib] = useState<PfLib | null>(null);
   const [sc, setSc] = useState<Scenario>("rfi");
   const [seat, setSeat] = useState(-1);
@@ -129,6 +129,23 @@ export function PreflopTrainer() {
     };
     await db.putTrainer(rec);
   }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA" || (e.target as HTMLElement)?.tagName === "SELECT") return;
+      if (!deal) return;
+      const k = Number(e.key);
+      if (!res && k >= 1 && k <= deal.node.a.length) {
+        e.preventDefault();
+        choose(k - 1);
+      } else if (res && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        next();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   if (!lib) return <Spinner text="프리플랍 솔루션 불러오는 중…" />;
   const n = deal?.node;
@@ -195,10 +212,12 @@ export function PreflopTrainer() {
             <div className="row">
               {n.a.map((a, i) => (
                 <button key={i} className="primary" style={{ background: colors[i], color: "#fff", opacity: res && res.chosen !== i && res.best !== i ? 0.5 : 1 }} onClick={() => choose(i)} disabled={!!res}>
+                  <span className="kbd" style={{ marginRight: 6, color: "#fff", borderColor: "rgba(255,255,255,.5)" }}>{i + 1}</span>
                   {a[2]}
                 </button>
               ))}
             </div>
+            <div className="muted small">단축키: 숫자 1~{n.a.length}로 선택, Enter·Space로 다음 문제</div>
           </div>
         )}
       </div>

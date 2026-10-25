@@ -134,9 +134,20 @@ export class LibSpot {
     const tree = buildTree(cfg);
     const w0 = new Float32Array(1326);
     const w1 = new Float32Array(1326);
+    let z0 = 0;
+    let z1 = 0;
     for (let s = 0; s < this.hands.n; s++) {
       w0[this.hands.combo[s]] = reach[0][s];
       w1[this.hands.combo[s]] = reach[1][s];
+      z0 += reach[0][s];
+      z1 += reach[1][s];
+    }
+    const unreached = !(z0 > 1e-9) || !(z1 > 1e-9);
+    if (unreached) {
+      for (let s = 0; s < this.hands.n; s++) {
+        if (!(z0 > 1e-9)) w0[this.hands.combo[s]] = 1;
+        if (!(z1 > 1e-9)) w1[this.hands.combo[s]] = 1;
+      }
     }
     const solver = new PostflopSolver(tree, w0, w1);
     let m = solver.metrics();
@@ -209,7 +220,7 @@ export class LibSpot {
       let v = 0;
       for (let a = 0; a < A; a++) v += data.strat[a * n + h] * data.ev[a * n + h];
       handEv[h] = v;
-      eqr[h] = equity[h] > 1e-6 && d.pot > 0 ? (v + d.invested[p]) / (equity[h] * d.pot) : 0;
+      eqr[h] = equity[h] > 1e-6 && d.pot > 0 ? v / (equity[h] * d.pot) : 0;
     }
     let wsum = 0;
     let rangeEv = 0;
@@ -243,12 +254,14 @@ export class LibSpot {
     if (t.type === "fold") shares = t.folder === 0 ? [0, t.pot] : [t.pot, 0];
     else {
       const eq = this.eq.equity(board, reach[1]);
+      const M = oppMass(this.hands, reach[1]);
       let num = 0;
       let den = 0;
       for (let h = 0; h < this.hands.n; h++) {
-        if (reach[0][h] <= 0) continue;
-        num += reach[0][h] * eq[h];
-        den += reach[0][h];
+        const w = reach[0][h] * M[h];
+        if (w <= 0) continue;
+        num += w * eq[h];
+        den += w;
       }
       const e = den > 0 ? num / den : 0.5;
       shares = [e * t.pot, (1 - e) * t.pot];
@@ -264,7 +277,7 @@ export class LibSpot {
       const an = s.analyzeDecision(node, ctx, reach);
       const actions: ActionView[] = node.actions.map((a, i) => ({ label: a.label, code: a.code, type: a.type, amount: a.amount, freq: an.actionFreq[i], ev: an.actionEv[i] }));
       const eqr = new Float32Array(s.hands.n);
-      for (let h = 0; h < s.hands.n; h++) eqr[h] = an.equity[h] > 1e-6 && node.pot > 0 ? (an.handEv[h] + node.invested[node.player]) / (an.equity[h] * node.pot) : 0;
+      for (let h = 0; h < s.hands.n; h++) eqr[h] = an.equity[h] > 1e-6 && node.pot > 0 ? an.handEv[h] / (an.equity[h] * node.pot) : 0;
       // 화면상 투자/팟은 리버 시작 기준이 아닌 전체 기준으로 보정
       const base = (this.meta.config.effStack - rs.tree.config.effStack);
       return buildDecisionView(
@@ -279,12 +292,14 @@ export class LibSpot {
       if (node.type === "fold") shares = node.folder === 0 ? [0, node.pot] : [node.pot, 0];
       else {
         const eq = s.equityVector(ctx, reach[1]);
+        const M = oppMass(s.hands, reach[1]);
         let num = 0;
         let den = 0;
         for (let h = 0; h < s.hands.n; h++) {
-          if (reach[0][h] <= 0) continue;
-          num += reach[0][h] * eq[h];
-          den += reach[0][h];
+          const w = reach[0][h] * M[h];
+          if (w <= 0) continue;
+          num += w * eq[h];
+          den += w;
         }
         const e = den > 0 ? num / den : 0.5;
         shares = [e * node.pot, (1 - e) * node.pot];

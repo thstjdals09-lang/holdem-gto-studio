@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 import { cardToString, comboIndex } from "../engine/cards";
-import { analyzePreflop, matchFlop, verdictOf, type DecisionGrade, type HandAnalysis } from "../lib/analyze";
+import { analyzePreflop, matchFlop, pickFormat, verdictOf, type DecisionGrade, type HandAnalysis } from "../lib/analyze";
 import { parseAll, type ParsedHand } from "../lib/hh";
 import { MATCHUPS } from "../lib/postflopLib";
-import { SAMPLE_HANDS } from "../lib/sampleHands";
+import { SAMPLE_HANDS, SAMPLE_HANDS_MTT } from "../lib/sampleHands";
 import { auxClient } from "../worker/client";
 import { Board, Spinner, useHashRoute } from "./common";
 import { bb, pct } from "./format";
@@ -38,7 +38,7 @@ export function AnalyzePage() {
     const flopsOf = (id: string) => avail.get(id) ?? [];
     for (const h of hands) {
       if (!h.hero || !h.heroCards) continue;
-      const f = fmt !== "auto" ? fmt : h.raw.includes("posts the ante") || h.seats.length > 6 ? "mtt8-40" : "cash6-100";
+      const f = fmt !== "auto" ? fmt : pickFormat(h, FORMAT_LIST.map((x) => x.id));
       const lib = await loadPreflop(f);
       const res = analyzePreflop(h, lib, flopsOf);
       out.push({ hand: h, an: res.analysis });
@@ -150,7 +150,7 @@ export function AnalyzePage() {
               }}
             />
             <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
-              <option value="auto">포맷 자동 (앤티 있으면 토너먼트)</option>
+              <option value="auto">포맷 자동 (토너먼트는 스택에 가장 가까운 깊이)</option>
               {FORMAT_LIST.map((f) => (
                 <option key={f.id} value={f.id}>
                   {f.name}
@@ -164,12 +164,22 @@ export function AnalyzePage() {
             </button>
             <button
               onClick={() => {
+                setText(SAMPLE_HANDS_MTT);
+                run(SAMPLE_HANDS_MTT);
+              }}
+              disabled={!!busy}
+            >
+              토너먼트 예시로 해보기
+            </button>
+            <button
+              className="ghost"
+              onClick={() => {
                 setText(SAMPLE_HANDS);
                 run(SAMPLE_HANDS);
               }}
               disabled={!!busy}
             >
-              예시 핸드로 해보기
+              캐시 예시
             </button>
             {rows.length > 0 && (
               <button className="ghost" onClick={() => setRows([])}>

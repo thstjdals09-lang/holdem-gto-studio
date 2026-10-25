@@ -82,26 +82,48 @@ export function parseHand(raw: string): ParsedHand | null {
   const maxSeats = tm ? Number(tm[1]) : 6;
   const button = tm ? Number(tm[2]) : 1;
   const seats: HHSeat[] = [];
+  const seatRe = new RegExp(`^Seat (\\d+): (.+?) \\(${MONEY}([\\d.,]+) in chips`);
   for (const l of lines) {
-    const m = l.match(new RegExp(`^Seat (\\d+): (.+?) \\(${MONEY}([\\d.,]+) in chips`));
-    if (m && !l.includes("folded") && !l.includes("collected")) seats.push({ seat: Number(m[1]), name: m[2], stack: num(m[3]) / bbAmt, position: "", order: 0 });
     if (l.startsWith("*** HOLE CARDS")) break;
+    const m = l.match(seatRe);
+    // 자리 비움·핸드 불참 좌석은 자리 계산에서 뺀다
+    if (m && !l.includes("folded") && !l.includes("collected") && !/sitting out|out of hand/i.test(l)) seats.push({ seat: Number(m[1]), name: m[2], stack: num(m[3]) / bbAmt, position: "", order: 0 });
   }
   if (seats.length < 2) return null;
-  // 자리 이름: 버튼 다음부터 SB, BB, ... 순으로 정렬해 프리플랍 순서로 매핑
   const sorted = seats.slice().sort((a, b) => a.seat - b.seat);
-  const bi = Math.max(0, sorted.findIndex((s) => s.seat >= button));
-  const fromBtn = [...sorted.slice(bi), ...sorted.slice(0, bi)]; // BTN, SB, BB, ...
+  // 빅 블라인드를 낸 플레이어로 자리 순서를 고정한다 (데드 버튼·빈 좌석 대응)
+  let bbName: string | null = null;
+  for (const l of lines) {
+    if (l.startsWith("*** HOLE CARDS")) break;
+    const m = l.match(/^(.+?): posts big blind/);
+    if (m) {
+      bbName = m[1];
+      break;
+    }
+  }
+  let actOrder: HHSeat[]; // 프리플랍 행동 순서 (UTG … BTN, SB, BB)
+  const bbIdx = bbName ? sorted.findIndex((s) => s.name === bbName) : -1;
+  if (bbIdx >= 0) actOrder = [...sorted.slice(bbIdx + 1), ...sorted.slice(0, bbIdx + 1)];
+  else {
+    // 블라인드 줄이 없으면 버튼 기준. 버튼 좌석이 비어 있으면 그 다음 좌석이 SB
+    const btnIdx = sorted.findIndex((s) => s.seat === button);
+    let sbIdx: number;
+    if (btnIdx >= 0) sbIdx = sorted.length === 2 ? btnIdx : (btnIdx + 1) % sorted.length;
+    else {
+      const k = sorted.findIndex((s) => s.seat > button);
+      sbIdx = k >= 0 ? k : 0;
+    }
+    const bIdx = (sbIdx + 1) % sorted.length;
+    actOrder = [...sorted.slice(bIdx + 1), ...sorted.slice(0, bIdx + 1)];
+  }
   const names = positionNames(seats.length); // 프리플랍 순서 (… BTN, SB, BB)
   if (seats.length === 2) {
-    fromBtn[0].position = "BTN";
-    fromBtn[0].order = 0;
-    fromBtn[1].position = "BB";
-    fromBtn[1].order = 1;
+    actOrder[0].position = "BTN";
+    actOrder[0].order = 0;
+    actOrder[1].position = "BB";
+    actOrder[1].order = 1;
   } else {
-    // fromBtn: [BTN, SB, BB, 나머지(UTG..CO)]
-    const order = [...fromBtn.slice(3), fromBtn[0], fromBtn[1], fromBtn[2]]; // 프리플랍 행동 순서
-    order.forEach((s, i) => {
+    actOrder.forEach((s, i) => {
       s.position = names[i];
       s.order = i;
     });

@@ -8,14 +8,20 @@ export interface Matchup {
   codes: string[]; // 프리플랍 액션 코드 경로
   oop: string;
   ip: string;
-  kind: "srp" | "3bp";
+  kind: "srp" | "3bp" | "limp";
+  /** main: 대표 플랍 24개, small: 12개 (보조 매치업, 반복 수를 줄여 생성) */
+  flopSet: "main" | "small";
 }
 
+const F = (k: number) => Array(k).fill("F") as string[];
+
+/** 토너먼트 8맥스 40bb(앤티) 기준 포스트플랍 라이브러리 */
 export const MATCHUPS: Matchup[] = [
-  { id: "btn-bb-srp", name: "BTN 오픈 vs BB 콜 (SRP)", format: "cash6-100", codes: ["F", "F", "F", "R2.5", "F", "C"], oop: "BB", ip: "BTN", kind: "srp" },
-  { id: "co-bb-srp", name: "CO 오픈 vs BB 콜 (SRP)", format: "cash6-100", codes: ["F", "F", "R2.5", "F", "F", "C"], oop: "BB", ip: "CO", kind: "srp" },
-  { id: "sb-bb-srp", name: "SB 오픈 vs BB 콜 (블라인드 배틀)", format: "cash6-100", codes: ["F", "F", "F", "F", "R3", "C"], oop: "SB", ip: "BB", kind: "srp" },
-  { id: "bb-btn-3bp", name: "BTN 오픈 · BB 3벳 · BTN 콜 (3BP)", format: "cash6-100", codes: ["F", "F", "F", "R2.5", "F", "R10", "C"], oop: "BB", ip: "BTN", kind: "3bp" }
+  { id: "m40-btn-bb", name: "BTN 오픈 vs BB 콜", format: "mtt8-40", codes: [...F(5), "R2.2", "F", "C"], oop: "BB", ip: "BTN", kind: "srp", flopSet: "main" },
+  { id: "m40-co-bb", name: "CO 오픈 vs BB 콜", format: "mtt8-40", codes: [...F(4), "R2.2", "F", "F", "C"], oop: "BB", ip: "CO", kind: "srp", flopSet: "small" },
+  { id: "m40-utg-bb", name: "UTG 오픈 vs BB 콜", format: "mtt8-40", codes: ["R2.2", ...F(6), "C"], oop: "BB", ip: "UTG", kind: "srp", flopSet: "small" },
+  { id: "m40-sb-bb-limp", name: "SB 림프 vs BB 체크 (블라인드 배틀)", format: "mtt8-40", codes: [...F(6), "L", "X"], oop: "SB", ip: "BB", kind: "limp", flopSet: "small" },
+  { id: "m40-bb-btn-3bp", name: "BTN 오픈 · BB 3벳 · BTN 콜 (3벳 팟)", format: "mtt8-40", codes: [...F(5), "R2.2", "F", "R7.92", "C"], oop: "BB", ip: "BTN", kind: "3bp", flopSet: "small" }
 ];
 
 /** 대표 플랍 24개 (높이·연결성·수트 구성·페어 분포를 고르게) */
@@ -32,10 +38,12 @@ export const FLOPS = [
 export const FLOPS_SMALL = ["As7d2c", "AhKd4c", "AhTh5h", "Ks7d2c", "Kd9d4s", "QhJd8c", "JsTd7c", "Ts9s6d", "9h7d2c", "8s6d5c", "7h5h3d", "8d8c3s"];
 
 export function flopsFor(matchupId: string): string[] {
-  return matchupId === "co-bb-srp" || matchupId === "sb-bb-srp" ? FLOPS_SMALL : FLOPS;
+  const m = MATCHUPS.find((x) => x.id === matchupId);
+  return m && m.flopSet === "small" ? FLOPS_SMALL : FLOPS;
 }
 
-export function treeConfigFor(kind: "srp" | "3bp", board: number[], pot: number, effStack: number): TreeConfig {
+/** srp: 프리플랍 레이저(IP)만 플랍 벳(OOP는 체크·체크레이즈), 3bp·limp: 양쪽 모두 플랍 33% 벳 */
+export function treeConfigFor(kind: Matchup["kind"], board: number[], pot: number, effStack: number): TreeConfig {
   if (kind === "srp") {
     return {
       board,

@@ -10,14 +10,14 @@ import { Board, CardPicker, Spinner, useHashRoute } from "./common";
 import { DecisionPanel } from "./DecisionPanel";
 import { RangeGrid, GridLegend, type GridMode } from "./RangeGrid";
 import { actionColors, bb, pct, STREET_LABEL, SEAT_COLORS } from "./format";
-import { decodeIdx, encodeIdx, findMatchup, flopTexture, FORMAT_LIST, libBase, loadMatchupIndex, loadPreflop } from "./lib";
+import { decodeIdx, encodeIdx, findMatchup, flopTexture, DEFAULT_FORMAT, FORMAT_LIST, libBase, loadMatchupIndex, loadPreflop } from "./lib";
 import { decodePath, encodePath, store } from "./store";
 
 type Step = { kind: "action"; index: number } | { kind: "card"; card: number };
 
 export function StudyPage() {
   const { params, navigate } = useHashRoute();
-  const fmt = params.get("fmt") ?? "cash6-100";
+  const fmt = params.get("fmt") ?? DEFAULT_FORMAT;
   const pfStr = params.get("pf");
   const pf = useMemo(() => decodeIdx(pfStr), [pfStr]);
   const flop = params.get("fl");

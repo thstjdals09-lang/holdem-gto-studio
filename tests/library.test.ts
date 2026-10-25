@@ -66,8 +66,11 @@ describe.skipIf(!cash)("프리플랍 라이브러리", () => {
     expect(Math.abs(sum)).toBeLessThan(0.1);
   });
   it("매치업 경로가 모두 플랍 터미널로 끝난다", () => {
-    for (const m of MATCHUPS.filter((x) => x.format === "cash6-100")) {
-      const w = walkCodes(cash!, m.codes);
+    for (const m of MATCHUPS) {
+      const path = `public/lib/preflop/${m.format}.json`;
+      if (!existsSync(path)) continue;
+      const lib: PfLib = JSON.parse(readFileSync(path, "utf-8"));
+      const w = walkCodes(lib, m.codes);
       expect(w.terminal?.type).toBe("flop");
     }
   });
@@ -76,19 +79,19 @@ describe.skipIf(!cash)("프리플랍 라이브러리", () => {
     const a1 = analyzePreflop(hands[0], cash!).analysis;
     expect(a1.inTree).toBe(true);
     expect(a1.decisions.length).toBe(1);
-    expect(a1.matchup).toBe("btn-bb-srp");
-    expect(a1.libFlop).toBe("Ks7d2c");
+    expect(a1.matchup).toBeNull(); // 포스트플랍 라이브러리는 토너먼트 기준
+    expect(a1.libFlop).toBeNull();
     const a2 = analyzePreflop(hands[1], cash!).analysis;
     expect(a2.decisions[0].chosen).toBe("폴드");
     expect(a2.decisions[0].verdict).toBe("correct");
     const a5 = analyzePreflop(hands[4], cash!).analysis; // BTN 72o 오픈 → 3벳에 폴드
     expect(a5.decisions.length).toBe(2);
     const a7 = analyzePreflop(hands[6], cash!).analysis; // BB 3벳 팟
-    expect(a7.matchup).toBe("bb-btn-3bp");
+    expect(a7.inTree).toBe(true);
   });
 });
 
-const flopDir = "public/lib/postflop/btn-bb-srp";
+const flopDir = "public/lib/postflop/m40-btn-bb";
 const readyFlop = existsSync(flopDir) ? readdirSync(flopDir).find((f: string) => existsSync(`${flopDir}/${f}/meta.json`)) : undefined;
 
 describe.skipIf(!readyFlop)("포스트플랍 라이브러리 스팟", () => {

@@ -35,9 +35,13 @@ export function findMatchup(fmt: string, codes: string[]): Matchup | null {
 }
 
 export const FORMAT_LIST = [
-  { id: "cash6-100", name: "캐시 6맥스 100bb" },
-  { id: "mtt8-40", name: "토너먼트 8맥스 40bb (앤티)" }
+  { id: "mtt8-15", name: "토너먼트 8맥스 15bb" },
+  { id: "mtt8-25", name: "토너먼트 8맥스 25bb" },
+  { id: "mtt8-40", name: "토너먼트 8맥스 40bb" },
+  { id: "mtt8-60", name: "토너먼트 8맥스 60bb" },
+  { id: "cash6-100", name: "캐시 6맥스 100bb (보조)" }
 ];
+export const DEFAULT_FORMAT = "mtt8-40";
 
 export function encodeIdx(a: number[]): string {
   return a.join(".");

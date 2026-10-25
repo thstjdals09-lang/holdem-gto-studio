@@ -50,6 +50,16 @@ export function classifyMade(hole: [number, number], board: number[]): Made {
   const br = board.map(rankOf).sort((a, b) => b - a);
   const h1 = rankOf(hole[0]);
   const h2 = rankOf(hole[1]);
+  const highCard: Made = h1 === 12 || h2 === 12 ? "에이스 하이" : "노메이드";
+  // 보드만으로 된 족보는 히어로 핸드로 치지 않는다
+  if (board.length >= 5 && score === boardScore) return "노메이드"; // 보드 플레이
+  if (cat === 3 || cat === 7) {
+    const cnt = new Map<number, number>();
+    for (const r of br) cnt.set(r, (cnt.get(r) ?? 0) + 1);
+    let trip = -1;
+    for (const [r, c] of cnt) if (c >= 3) trip = r;
+    if (trip >= 0 && h1 !== trip && h2 !== trip) return highCard; // 보드 트립스·포카드 + 키커
+  }
   if (cat === 8) return "스트레이트 플러시";
   if (cat === 7) return "포카드";
   if (cat === 6) return "풀하우스";
@@ -63,7 +73,7 @@ export function classifyMade(hole: [number, number], board: number[]): Made {
     // 보드 페어 + 내 페어 = 투페어처럼 보이지만 실제 기여 확인
     const boardPaired = new Set(br).size < br.length;
     const holeHits = br.includes(h1) || br.includes(h2) || h1 === h2;
-    if (boardPaired && !holeHits) return "노메이드";
+    if (boardPaired && !holeHits) return highCard; // 보드 투페어
     if (boardPaired && h1 !== h2) {
       // 보드 페어 + 내가 맞춘 페어 하나: 실질적으로 원페어 등급
       return pairKind(h1, h2, br);
@@ -76,8 +86,7 @@ export function classifyMade(hole: [number, number], board: number[]): Made {
     if (boardPaired && h1 !== h2 && !br.includes(h1) && !br.includes(h2)) return h1 === 12 || h2 === 12 ? "에이스 하이" : "노메이드";
     return pairKind(h1, h2, br);
   }
-  void boardScore;
-  return h1 === 12 || h2 === 12 ? "에이스 하이" : "노메이드";
+  return highCard;
 }
 
 function pairKind(h1: number, h2: number, br: number[]): Made {

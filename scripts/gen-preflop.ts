@@ -5,7 +5,7 @@ import { buildEquityMatrix } from "../src/engine/preflop";
 import { buildCompat, buildRingTree, RING_FORMATS, RingSolver, type RingNode } from "../src/engine/ring";
 
 const EQ_PATH = ".cache/eq169-4000.bin";
-const OUT = "public/lib/preflop";
+const OUT = process.env.PF_OUT ?? "public/lib/preflop"; // 실험용 출력 폴더 지정 가능
 mkdirSync(OUT, { recursive: true });
 let eq: Float32Array;
 if (existsSync(EQ_PATH)) eq = new Float32Array(readFileSync(EQ_PATH).buffer.slice(0));
@@ -15,12 +15,14 @@ else {
   writeFileSync(EQ_PATH, Buffer.from(eq.buffer));
   console.log(`\nequity matrix ${(Date.now() - t0) / 1000}s`);
 }
-writeFileSync("public/lib/eq169.bin", Buffer.from(eq.buffer));
+if (!process.env.PF_OUT) writeFileSync("public/lib/eq169.bin", Buffer.from(eq.buffer));
 const compat = buildCompat();
 const only = process.argv[2];
 const iters = Number(process.argv[3] ?? "600");
-for (const f of RING_FORMATS) {
-  if (only && f.id !== only) continue;
+for (const f0 of RING_FORMATS) {
+  if (only && f0.id !== only) continue;
+  // 실험용: PF_SLOPE 로 실현계수 기울기 덮어쓰기
+  const f = process.env.PF_SLOPE ? { ...f0, realization: { ...f0.realization, slope: Number(process.env.PF_SLOPE) } } : f0;
   const tree = buildRingTree(f);
   const solver = new RingSolver(tree, eq, compat);
   const t0 = Date.now();
