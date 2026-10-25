@@ -297,7 +297,7 @@ ${antes(T4)}
 Hero: posts small blind 200
 Hal: posts big blind 400
 *** HOLE CARDS ***
-Dealt to Hero [Qd 9c]
+Dealt to Hero [Td 7c]
 Ann: folds
 Ben: folds
 Cal: folds
