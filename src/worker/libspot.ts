@@ -7,6 +7,13 @@ import type { FlopMeta } from "../lib/postflopLib";
 import type { ActionView, NodeView, PathStep } from "./protocol";
 import { buildDecisionView } from "./views";
 
+/** 라이브러리 파일을 읽는 함수 (앱·Node 에서 바꿔 끼울 수 있다). 기본은 전역 fetch */
+export type LibraryFetch = (url: string) => Promise<{ ok: boolean; headers: { get(name: string): string | null }; arrayBuffer(): Promise<ArrayBuffer>; json(): Promise<unknown> }>;
+let libFetch: LibraryFetch = (url) => fetch(url);
+export function setLibraryFetch(fn: LibraryFetch): void {
+  libFetch = fn;
+}
+
 export type AnalyzeItem = { kind: "card"; card: number } | { kind: "action"; actor: 0 | 1; type: "fold" | "check" | "call" | "bet" | "raise"; amount: number; allin: boolean };
 export interface PostGrade {
   street: "flop" | "turn" | "river";
@@ -105,8 +112,8 @@ export class LibSpot {
 
   static async load(baseUrl: string, matchup: string, flop: string): Promise<LibSpot> {
     const dir = `${baseUrl}postflop/${matchup}/${flop}/`;
-    const [metaRes, flopRes] = await Promise.all([fetch(dir + "meta.json"), fetch(dir + "flop.bin")]);
-    const isHtml = (r: Response) => (r.headers.get("content-type") ?? "").includes("text/html");
+    const [metaRes, flopRes] = await Promise.all([libFetch(dir + "meta.json"), libFetch(dir + "flop.bin")]);
+    const isHtml = (r: { headers: { get(name: string): string | null } }) => (r.headers.get("content-type") ?? "").includes("text/html");
     if (!metaRes.ok || !flopRes.ok || isHtml(metaRes) || isHtml(flopRes)) throw new Error(`이 플랍(${flop})의 라이브러리 파일이 없습니다`);
     const meta = (await metaRes.json()) as FlopMeta;
     return new LibSpot(meta, await flopRes.arrayBuffer(), dir);
@@ -115,7 +122,7 @@ export class LibSpot {
   private async turnData(card: number): Promise<Map<number, NodeData>> {
     let t = this.turns.get(card);
     if (t) return t;
-    const res = await fetch(`${this.baseUrl}t/${cardToString(card)}.bin`);
+    const res = await libFetch(`${this.baseUrl}t/${cardToString(card)}.bin`);
     if (!res.ok || (res.headers.get("content-type") ?? "").includes("text/html")) throw new Error("턴 데이터를 불러오지 못했습니다");
     t = decode(await res.arrayBuffer(), this.turnNodes, this.hands.n);
     this.turns.set(card, t);

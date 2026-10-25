@@ -4,3 +4,5 @@ dist/
 .DS_Store
 .cache/
 public/lib/postflop/
+sdk/dist/
+release/

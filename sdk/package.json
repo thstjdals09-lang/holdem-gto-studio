@@ -1,0 +1,27 @@
+{
+  "name": "holdem-gto-solver",
+  "version": "1.0.0",
+  "description": "홀덤 GTO 솔버 SDK — 미리 푼 토너먼트 라이브러리 조회, 병렬 커스텀 솔브, 노드 잠금, 리버 재솔브, 핸드 히스토리 분석 (브라우저·Node)",
+  "type": "module",
+  "main": "./dist/gto-node.js",
+  "module": "./dist/gto.js",
+  "types": "./dist/types/sdk/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/sdk/src/index.d.ts",
+      "node": "./dist/gto-node.js",
+      "default": "./dist/gto.js"
+    },
+    "./node": {
+      "types": "./dist/types/sdk/src/node.d.ts",
+      "default": "./dist/gto-node.js"
+    },
+    "./sub-worker": "./dist/gto-sub-worker.js",
+    "./sub-worker-node": "./dist/gto-sub-worker-node.js"
+  },
+  "files": ["dist", "README.md", "API.md", "DATA.md", "LICENSE", "examples"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "thstjdals09-lang"
+}

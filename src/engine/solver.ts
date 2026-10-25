@@ -1044,6 +1044,12 @@ export class PostflopSolver {
       const m = this.mult[d.id];
       for (let r = 0; r < m; r++) {
         const base = r * A * n;
+        // 잠긴 노드는 실제로 적용되는 고정 전략을 내보낸다
+        const lk = this.locks.size ? this.lockOf(d, base) : null;
+        if (lk) {
+          out.set(lk, off + base);
+          continue;
+        }
         for (let h = 0; h < n; h++) {
           let sum = 0;
           for (let a = 0; a < A; a++) sum += ss[base + a * n + h];
