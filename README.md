@@ -28,6 +28,37 @@ GTO Wizard처럼 **미리 풀어둔 솔루션을 바로 탐색**하고, 그 솔�
 
 `sdk/`는 이 엔진을 다른 앱에 넣어 쓰는 독립 패키지(holdem-gto-solver)입니다. 라이브러리 조회, 핸드 분석, 병렬 커스텀 솔브, 노드 잠금, 저장·불러오기를 API로 제공합니다. `npm run sdk:build`로 빌드하고 `npm run sdk:pack`으로 `release/holdem-gto-solver-<버전>.tgz`를 만듭니다. 배포본은 비공개 저장소 `thstjdals09-lang/gto-solver-sdk`의 릴리스에 있습니다. 사용법은 `sdk/README.md`, `sdk/API.md`, `sdk/DATA.md`를 보세요.
 
+## 행동 결정 모델
+
+지금 상황을 주면 내 차례의 액션별 빈도·EV와 추천 액션을 2.5초 안에 돌려줍니다 (`src/lib/decide.ts`, SDK 에서는 `GtoLibrary.decide()`). 2~8명, 15·25·40·60bb.
+
+```bash
+npm run decide -- 상황.json
+```
+
+```json
+{
+  "players": 8, "hero": "BTN", "cards": "AsKd", "stack": 40,
+  "preflop": [
+    { "pos": "UTG", "type": "fold" }, { "pos": "UTG1", "type": "fold" }, { "pos": "LJ", "type": "fold" },
+    { "pos": "HJ", "type": "fold" }, { "pos": "CO", "type": "fold" },
+    { "pos": "BTN", "type": "raise", "to": 2.2 }, { "pos": "SB", "type": "fold" }, { "pos": "BB", "type": "call" }
+  ],
+  "board": "Ks7d2c",
+  "flop": [{ "pos": "BB", "type": "check" }]
+}
+```
+
+액션은 내 차례 직전까지만 넣습니다. `to`는 그 스트리트에서 그 자리가 넣은 총액(bb)입니다. 8명보다 적으면 앞자리부터 비어 있는 것으로 봅니다(6명이면 LJ가 첫 자리).
+
+| 스트리트 | 방법 | 믿을 만한 정도 |
+| --- | --- | --- |
+| 프리플랍 | 미리 푼 8맥스 라이브러리 조회 | 라이브러리와 같음 |
+| 리버 | 넘어온 레인지로 끝까지 풀기 | 주어진 레인지 안에서는 수렴 (익스플로잇 0.1% 안팎) |
+| 플랍·턴 | 지금 스트리트만 풀고 뒤는 에퀴티×실현 모델 (`src/engine/street.ts`) | 근사. 만든 패를 콜보다 레이즈로 고르는 편향이 있고, 그 레인지가 리버로 넘어감 |
+
+3명 이상 팟은 나와 주 상대 한 명의 승부로 줄여 풉니다. 결과의 `notes`에 그 결정에 쓰인 근사가 적혀 나옵니다.
+
 ## 생성
 
 ```bash

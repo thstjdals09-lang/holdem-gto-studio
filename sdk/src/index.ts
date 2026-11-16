@@ -32,3 +32,7 @@ export type { NodeView, DecisionView, ChanceView, TerminalView, ActionView, Comb
 // 핸드 히스토리
 export { parseAll as parseHandHistories, parseHand, positionNames, type ParsedHand, type HHAction, type HHSeat } from "../../src/lib/hh";
 export { analyzePreflop, matchFlop, pickFormat, verdictOf, type HandAnalysis, type DecisionGrade, type Verdict } from "../../src/lib/analyze";
+
+// 행동 결정 모델
+export { decide, type Spot, type Act, type Decision, type Option as DecisionOption, type DecideOptions } from "../../src/lib/decide";
+export { StreetSolver } from "../../src/engine/street";

@@ -6,6 +6,7 @@ import { MATCHUPS, type Matchup, type MatchupIndex } from "../../src/lib/postflo
 import { LibSpot, setLibraryFetch, type LibraryFetch } from "../../src/worker/libspot";
 import { parseAll, type ParsedHand } from "../../src/lib/hh";
 import { analyzePreflop, matchFlop, pickFormat, verdictOf, type DecisionGrade, type HandAnalysis } from "../../src/lib/analyze";
+import { decide, type Decision, type DecideOptions, type Spot } from "../../src/lib/decide";
 
 /** 공개 라이브러리 기본 주소 (CORS 허용, GitHub Pages) */
 export const DEFAULT_LIBRARY_URL = "https://thstjdals09-lang.github.io/gto-studio/lib/";
@@ -146,6 +147,14 @@ export class GtoLibrary {
       });
     }
     return { format: formatId, kind: "decision", position: P[nd.p], line: nd.line, pot: nd.pot, toCall: nd.call, actions, hands, ranges };
+  }
+
+  /**
+   * 행동 결정: 지금 상황에서 내 차례의 액션별 빈도·EV와 추천 액션 (2~8명, 기본 2.5초 안).
+   * 프리플랍은 라이브러리 조회, 리버는 끝까지 풀고, 플랍·턴은 한 스트리트 근사다 (Decision.notes 에 표시).
+   */
+  decide(spot: Spot, opts: Omit<DecideOptions, "preflop"> = {}): Promise<Decision> {
+    return decide(spot, { ...opts, preflop: (id) => this.preflop(id) });
   }
 
   /** 매치업 리포트 인덱스 (플랍별 첫 액션 빈도·EV·에퀴티) */
