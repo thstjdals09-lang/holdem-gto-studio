@@ -16,7 +16,7 @@ const commit = execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
 mkdirSync(join(stage, "source"));
 const tar = join("release", `${name}-source.tar`);
 execSync(`git archive --format=tar -o "${tar}" HEAD`, { stdio: "inherit" });
-execSync(`python -c "import sys,tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2])" "${tar}" "${join(stage, "source")}"`, { stdio: "inherit" });
+execSync(`python -c "import sys,tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')" "${tar}" "${join(stage, "source")}"`, { stdio: "inherit" });
 rmSync(tar);
 // 앱: 빌드 결과 + 로컬 서버 + 실행 파일
 cpSync("dist-review", join(stage, "app"), { recursive: true });
@@ -29,5 +29,7 @@ const prov = JSON.parse(readFileSync("src/review/provenance.json", "utf8"));
 writeFileSync(join(stage, "PROVENANCE.json"), JSON.stringify({ ...prov, package: name, sourceCommit: commit, branch: "hand-review", builtAt: new Date().toISOString() }, null, 2) + "\n");
 const zip = join("release", `${name}.zip`);
 rmSync(zip, { force: true });
-execSync(`python -c "import os,sys,zipfile\nroot,out=sys.argv[1],sys.argv[2]\nz=zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9)\nbase=os.path.dirname(root)\nfor d,_,fs in os.walk(root):\n    for f in fs:\n        p=os.path.join(d,f); z.write(p,os.path.relpath(p,base))\nz.close()" "${stage}" "${zip}"`, { stdio: "inherit" });
+// 윈도우 cmd 는 -c 인자의 줄바꿈에서 명령을 끊으므로 한 줄로 쓴다
+execSync(`python -c "import os,sys,zipfile; root,out=sys.argv[1],sys.argv[2]; base=os.path.dirname(root); z=zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9); [z.write(os.path.join(d,f), os.path.relpath(os.path.join(d,f),base)) for d,_,fs in os.walk(root) for f in fs]; z.close()" "${stage}" "${zip}"`, { stdio: "inherit" });
+if (!existsSync(zip)) throw new Error("ZIP 을 만들지 못했습니다");
 console.log(`ZIP: ${zip} (소스 커밋 ${commit.slice(0, 7)})`);
