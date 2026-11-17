@@ -36,3 +36,4 @@ export { analyzePreflop, matchFlop, pickFormat, verdictOf, type HandAnalysis, ty
 // 행동 결정 모델
 export { decide, type Spot, type Act, type Decision, type Option as DecisionOption, type DecideOptions } from "../../src/lib/decide";
 export { StreetSolver } from "../../src/engine/street";
+export { skew, exploitEVs, type Read } from "../../src/lib/exploit";

@@ -772,6 +772,22 @@ export class RingSolver {
     return res;
   }
 
+  /** 한 결정 노드에서 그 자리의 액션별 EV (A×169, bb, 폴드=0). r = 그 노드까지의 자리별 reach, 이후는 평균 전략(stratSum)대로 */
+  evAt(d: RingDecision, r: Float64Array[]): Float64Array {
+    const S = r.map((v) => {
+      const s = new Float64Array(NUM_CLASSES);
+      this.mass(v, s);
+      return s;
+    });
+    this.record = new Map();
+    try {
+      this.traverse(d, d.player, r, S, new Float64Array(NUM_CLASSES), "avg");
+      return this.record.get(d.id)!;
+    } finally {
+      this.record = null;
+    }
+  }
+
   avgStrategy(d: RingDecision): Float64Array {
     const o = new Float64Array(d.actions.length * NUM_CLASSES);
     this.sigma(d, true, o);

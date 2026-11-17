@@ -70,6 +70,7 @@ export class GtoLibrary {
   readonly baseUrl: string;
   private fetchFn: LibraryFetch;
   private pre = new Map<string, Promise<PfLib>>();
+  private eq: Promise<Float32Array> | null = null;
   private idx = new Map<string, Promise<MatchupIndex | null>>();
   private spots = new Map<string, Promise<LibSpot>>();
 
@@ -154,7 +155,18 @@ export class GtoLibrary {
    * 프리플랍은 라이브러리 조회, 리버는 끝까지 풀고, 플랍·턴은 한 스트리트 근사다 (Decision.notes 에 표시).
    */
   decide(spot: Spot, opts: Omit<DecideOptions, "preflop"> = {}): Promise<Decision> {
-    return decide(spot, { ...opts, preflop: (id) => this.preflop(id) });
+    // 상대 성향(spot.reads)을 쓸 때만 받는다 (한 번 받으면 재사용)
+    const eq = () => {
+      if (!this.eq) {
+        this.eq = this.fetchFn(`${this.baseUrl}eq169.bin`).then(async (r) => {
+          if (!r.ok) throw new Error("에퀴티 행렬(eq169.bin)을 불러오지 못했습니다");
+          return new Float32Array(await r.arrayBuffer());
+        });
+        this.eq.catch(() => (this.eq = null)); // 실패는 기억하지 않는다
+      }
+      return this.eq;
+    };
+    return decide(spot, { eq, ...opts, preflop: (id) => this.preflop(id) });
   }
 
   /** 매치업 리포트 인덱스 (플랍별 첫 액션 빈도·EV·에퀴티) */

@@ -7,6 +7,7 @@ import { PostflopSolver, type HandSet } from "../engine/solver";
 import { StreetSolver } from "../engine/street";
 import { buildTree, type DecisionNode, type GameTree, type TreeConfig, type TreeNode } from "../engine/tree";
 import { mapPreflopAction } from "./analyze";
+import { exploitEVs, isRead, skew, type Read } from "./exploit";
 import { CLASS_N, reachToCombos, type PfLib, type PfLibNode } from "./preflopLib";
 
 export interface Act {
@@ -34,6 +35,12 @@ export interface Spot {
   river?: Act[];
   /** 프리플랍 라이브러리 포맷. 없으면 스택에 가장 가까운 mtt8-6/10/15/25/40/60 */
   format?: string;
+  /**
+   * 상대 성향: 자리 이름(또는 모두를 뜻하는 "*") → GTO 대비 콜·레이즈 배수. 예: { "*": { call: 2 }, "BTN": { raise: 3 } }
+   * (BTN 은 "*" 의 call 2 에 raise 3 이 더해진다). 배수는 그 상대의 모든 프리플랍 결정(오픈·3벳·4벳·올인 콜)에 똑같이 적용된다.
+   * 주면 프리플랍에서 그 상대의 레인지를 그만큼 넓히거나 좁혀서 보고, 내 액션은 EV 가 가장 큰 것을 고른다
+   */
+  reads?: Record<string, Read>;
 }
 export interface Option {
   type: string;
@@ -50,8 +57,8 @@ export interface Decision {
   options: Option[];
   /** 추천 액션 (options 의 번호). rng 를 주면 빈도대로 뽑고, 없으면 빈도가 가장 높은 것 */
   pick: number;
-  /** library = 미리 푼 표 조회, street-solve = 그 자리에서 한 스트리트 솔브 */
-  source: "library" | "street-solve";
+  /** library = 미리 푼 표 조회, exploit = 상대 성향을 넣어 다시 계산한 프리플랍, street-solve = 그 자리에서 한 스트리트 솔브 */
+  source: "library" | "exploit" | "street-solve";
   format: string;
   iterations?: number;
   exploitabilityPct?: number;
@@ -62,6 +69,8 @@ export interface Decision {
 export interface DecideOptions {
   /** 프리플랍 라이브러리(JSON)를 주는 함수 */
   preflop: (formatId: string) => Promise<PfLib>;
+  /** 169×169 프리플랍 에퀴티 행렬(lib/eq169.bin). 상대 성향(reads)을 쓸 때만 필요 */
+  eq?: () => Promise<Float32Array | Float64Array>;
   /** 한 번의 결정에 쓸 시간 (ms, 기본 2500) */
   budgetMs?: number;
   rng?: () => number;
@@ -70,6 +79,8 @@ export interface DecideOptions {
 const DEPTHS = [6, 10, 15, 25, 40, 60];
 const MIN_ITER = 10;
 const MAX_ITER = 1000;
+/** 이보다 익스플로잇어빌리티(%)가 크면 못 믿을 답이라고 알린다. 한가한 PC 에서는 0.5% 아래로 끝난다 */
+const UNCONVERGED_PCT = 1;
 const STREETS = ["flop", "turn", "river"] as const;
 /** 지나온 스트리트를 처음 풀 때 쓰는 시간 (ms). 순서대로 물으면 기억해 둔 것을 쓰므로 들지 않는다 */
 const REPLAY_MS = [400, 400];
@@ -171,6 +182,14 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
   if (spot.stack < cfg.stack * 0.6 || spot.stack > cfg.stack * 1.5) note(`스택 ${spot.stack}bb 를 가장 가까운 ${cfg.stack}bb 표로 계산했습니다`);
   if (spot.players === 2) note("헤즈업 프리플랍은 8맥스 SB 대 BB 표로 근사했습니다");
 
+  for (const [pos, rd] of Object.entries(spot.reads ?? {})) {
+    if (pos !== "*" && !P.includes(pos)) throw new Error(`reads 의 자리 이름이 잘못됐습니다: ${pos}`);
+    if (!rd || typeof rd !== "object" || Object.keys(rd).some((k) => k !== "call" && k !== "raise")) throw new Error(`reads 의 값은 { call, raise } 여야 합니다 (${pos})`);
+    for (const k of [rd.call ?? 1, rd.raise ?? 1]) if (!(typeof k === "number" && k >= 0 && k <= 10)) throw new Error(`reads 의 배수는 0~10 이어야 합니다 (${pos})`);
+  }
+  const readOf = (seat: number): Read | undefined => (seat >= first && seat !== hero && spot.reads ? { ...spot.reads["*"], ...spot.reads[P[seat]] } : undefined);
+  const exploit = P.some((_, seat) => isRead(readOf(seat)));
+
   // ---- 프리플랍: 라이브러리 트리를 실제 액션대로 따라간다 ----
   const acts = spot.preflop.slice();
   const inv = P.map((_, i) => (i === N - 2 ? cfg.sb : i === N - 1 ? cfg.bb : 0));
@@ -193,7 +212,15 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
         const label = x[0] === "allin" ? `올인 ${amount}` : x[2].startsWith("콜") ? `콜 ${r2(Math.max(0, amount - inv[hero]))}` : x[2];
         return { type: x[0], label, amount, freq: nd.s[a * NUM_CLASSES + cls] / 1000, ev: nd.e[a * NUM_CLASSES + cls] / 100 };
       });
-      return { street: "preflop", options, pick: choose(options, opts.rng), source: "library", format, ms: Date.now() - t0, notes };
+      if (!exploit) return { street: "preflop", options, pick: choose(options, opts.rng), source: "library", format, ms: Date.now() - t0, notes };
+      // 상대가 GTO 가 아니라고 알려 줬으면 표의 빈도 대신, 그 상대에게 EV 가 가장 큰 액션을 고른다
+      if (!opts.eq) throw new Error("상대 성향(reads)을 쓰려면 에퀴티 행렬을 주는 eq 가 필요합니다");
+      const ev = exploitEVs(lib, await opts.eq(), nd, reach, readOf);
+      options.forEach((o, a) => (o.ev = Math.round(ev[a * NUM_CLASSES + cls] * 100) / 100));
+      const best = options.reduce((b, o, a) => (o.ev > options[b].ev ? a : b), 0);
+      options.forEach((o, a) => (o.freq = a === best ? 1 : 0));
+      note("상대 성향(reads)을 넣어 EV 가 가장 큰 액션을 골랐습니다. 빈도는 GTO 빈도가 아닙니다");
+      return { street: "preflop", options, pick: best, source: "exploit", format, ms: Date.now() - t0, notes };
     } else {
       const a = acts.splice(k, 1)[0];
       if (a.type === "call") inv[i] = Math.min(spot.stack, Math.max(...inv));
@@ -211,7 +238,11 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
       }
     }
     const r = reach[i];
-    for (let c = 0; c < NUM_CLASSES; c++) r[c] *= nd.s[ai * NUM_CLASSES + c] / 1000;
+    // 성향이 있는 상대는 비튼 전략으로 레인지를 좁힌다. 그 성향으로는 나올 수 없는 액션이면 GTO 로 좁힌다
+    const sig = isRead(readOf(i)) ? skew(nd, r, readOf(i)) : null;
+    const use = sig && r.some((x, c) => x * sig[ai * NUM_CLASSES + c] > 0) ? sig : null;
+    if (sig && !use) note(`${P[i]} 의 액션이 준 성향(reads)으로는 나오지 않는 것이라 GTO 레인지로 봤습니다`);
+    for (let c = 0; c < NUM_CLASSES; c++) r[c] *= use ? use[ai * NUM_CLASSES + c] : nd.s[ai * NUM_CLASSES + c] / 1000;
     const child: number | string = nd.c[ai];
     if (typeof child === "string") {
       end = child;
@@ -221,6 +252,7 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
   const term = lib.terminals[Number(end.slice(1))];
   if (!term || term.type !== "flop") throw new Error("프리플랍에서 핸드가 끝났습니다 (결정할 것이 없습니다)");
   if (term.fold[hero]) throw new Error("내 자리는 이미 폴드했습니다 (GTO 트리에 없는 콜로 들어간 경우 포함)");
+  if (exploit) note("상대 성향(reads)은 프리플랍 레인지에만 반영했습니다. 포스트플랍에서 상대가 벳·콜하는 방식은 GTO 로 가정합니다");
   if (acts.length) note(`프리플랍 액션 ${acts.length}개는 트리에서 따라가지 못해 반영하지 않았습니다 (${acts.map((a) => `${a.pos} ${a.type}`).join(", ")})`);
 
   // ---- 포스트플랍 ----
@@ -255,7 +287,7 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
     const extra = extraBet(firstBet ? Math.round((firstBet.to! / pot) * 100) : 0);
     const jam = list.some((a) => (a.type === "bet" || a.type === "raise") && (a.allin || (a.to ?? 0) >= left - 0.01));
     const sb = board.slice(0, nb);
-    const key = JSON.stringify([format, spot.players, spot.hero, combo, spot.stack, spot.preflop, sb, STREETS.slice(0, si).map((s) => spot[s]), vill, extra, jam]);
+    const key = JSON.stringify([format, spot.reads, spot.players, spot.hero, combo, spot.stack, spot.preflop, sb, STREETS.slice(0, si).map((s) => spot[s]), vill, extra, jam]);
     let solver = cache.get(key);
     const fresh = !solver;
     if (!solver) {
@@ -332,7 +364,10 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
       if (name !== "river") note("플랍·턴은 지금 스트리트만 푸는 근사라 GTO 와 차이가 납니다(만든 패를 레이즈 쪽으로 과하게 고르는 편향 확인됨)");
       else note("리버는 끝까지 푼 값이지만, 상대 레인지는 근사인 플랍·턴 풀이에서 넘어온 것입니다");
       if (solver.sampled) note(`승률은 런아웃 ${solver.runouts}개 표본으로 계산했습니다`);
-      return { street: name, options, pick: choose(options, opts.rng), source: "street-solve", format, iterations: solver.iterations, exploitabilityPct: r3(solver.metrics().exploitabilityPct), ms: Date.now() - t0, notes };
+      const expl = r3(solver.metrics().exploitabilityPct);
+      // 측정(2026-11-17): 다른 프로그램이 CPU 를 쓰는 동안에는 리버가 400회 대신 10회만 돌아 4.7% 에서 멈췄다
+      if (expl > UNCONVERGED_PCT) note(`시간 안에 수렴하지 못했습니다(반복 ${solver.iterations}회, 익스플로잇 ${expl}%). 다른 프로그램이 CPU 를 쓰고 있으면 이렇게 되고, 이 답은 믿기 어렵습니다`);
+      return { street: name, options, pick: choose(options, opts.rng), source: "street-solve", format, iterations: solver.iterations, exploitabilityPct: expl, ms: Date.now() - t0, notes };
     }
 
     // 다음 스트리트로 팟·스택·레인지를 넘긴다
