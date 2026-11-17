@@ -5,7 +5,7 @@
 ```
 lib/
   eq169.bin                         169×169 프리플랍 올인 에퀴티 (float32, 행 = 내 클래스)
-  preflop/<format>.json             프리플랍 전체 트리 (mtt8-15, mtt8-25, mtt8-40, mtt8-60, cash6-100)
+  preflop/<format>.json             프리플랍 전체 트리 (mtt8-6, mtt8-10, mtt8-15, mtt8-25, mtt8-40, mtt8-60, cash6-100)
   postflop/<matchup>/index.json     플랍별 요약 (리포트)
   postflop/<matchup>/<flop>/meta.json
   postflop/<matchup>/<flop>/flop.bin

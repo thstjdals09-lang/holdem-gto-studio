@@ -82,6 +82,38 @@ describe.skipIf(!lib)("decide — 프리플랍", () => {
   });
 });
 
+const has = (id: string) => existsSync(`public/lib/preflop/${id}.json`);
+const byId = async (id: string) => JSON.parse(readFileSync(`public/lib/preflop/${id}.json`, "utf-8")) as PfLib;
+
+describe.skipIf(!has("mtt8-6") || !has("mtt8-10"))("decide — 짧은 스택 (15bb 미만)", () => {
+  const toBtn = folds("UTG", "UTG1", "LJ", "HJ", "CO");
+
+  it("7bb BTN K9o: 6bb 표에서 올인하고, 금액은 표의 6이 아니라 내 스택 7", async () => {
+    const d = await decide({ players: 8, hero: "BTN", cards: "Ks9d", stack: 7, preflop: toBtn }, { preflop: byId });
+    expect(d.format).toBe("mtt8-6");
+    expect(d.options[d.pick].type).toBe("allin");
+    expect(d.options[d.pick].amount).toBe(7);
+    expect(d.options[d.pick].label).toBe("올인 7");
+  });
+
+  it("7bb BB 가 BTN 올인을 받으면 A2o 는 콜, 72o 는 폴드, 콜 금액은 7", async () => {
+    const jam = [...toBtn, { pos: "BTN", type: "raise" as const, allin: true }, ...folds("SB")];
+    const a2 = await decide({ players: 8, hero: "BB", cards: "As2d", stack: 7, preflop: jam }, { preflop: byId });
+    const call = a2.options[a2.pick];
+    expect(call.type).toBe("call");
+    expect(call.amount).toBe(7);
+    expect(call.label).toBe("콜 6");
+    const junk = await decide({ players: 8, hero: "BB", cards: "7s2h", stack: 7, preflop: jam }, { preflop: byId });
+    expect(junk.options[junk.pick].type).toBe("fold");
+  });
+
+  it("11bb 는 10bb 표를 쓰고 UTG AA 는 들어간다", async () => {
+    const d = await decide({ players: 8, hero: "UTG", cards: "AsAh", stack: 11, preflop: [] }, { preflop: byId });
+    expect(d.format).toBe("mtt8-10");
+    expect(d.options[d.pick].type).not.toBe("fold");
+  });
+});
+
 describe.skipIf(!lib)("decide — 포스트플랍 (스트리트마다 3초 안)", () => {
   const base: Spot = { players: 8, hero: "BTN", cards: "AsKd", stack: 40, preflop: [...folds("UTG", "UTG1", "LJ", "HJ", "CO"), { pos: "BTN", type: "raise", to: 2.2 }, ...folds("SB"), { pos: "BB", type: "call" }] };
 

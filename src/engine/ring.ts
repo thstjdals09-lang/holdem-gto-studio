@@ -800,7 +800,33 @@ export class RingSolver {
 }
 
 // ---------------- 기본 포맷 ----------------
+// 15bb 미만: 6bb 는 오픈 2bb 가 올인 기준(30%)을 넘어 푸시/폴드(+SB 림프)가 되고, 10bb 는 미니 오픈과 올인이 함께 남는다
+const shortStack = (stack: number): RingConfig => ({
+  id: `mtt8-${stack}`,
+  name: `토너먼트 8맥스 ${stack}bb (앤티)`,
+  positions: ["UTG", "UTG1", "LJ", "HJ", "CO", "BTN", "SB", "BB"],
+  stack,
+  sb: 0.5,
+  bb: 1,
+  ante: 0.125,
+  openTo: [2, 2, 2, 2, 2, 2, 2.5, 0],
+  threeBetIP: 2.8,
+  threeBetOOP: 3.4,
+  squeezeAdd: 1,
+  fourBet: 2.2,
+  allinThresholdPct: 30,
+  maxPlayersInPot: 3,
+  coldCall3bet: false,
+  sbLimp: true,
+  openJam: true,
+  rakePct: 0,
+  rakeCap: 0,
+  realization: { ip: 1.04, oop: 0.88, mwIp: 1.0, mwOop: 0.86, slope: 0.2 }
+});
+
 export const RING_FORMATS: RingConfig[] = [
+  shortStack(6),
+  shortStack(10),
   {
     id: "mtt8-15",
     name: "토너먼트 8맥스 15bb (앤티)",

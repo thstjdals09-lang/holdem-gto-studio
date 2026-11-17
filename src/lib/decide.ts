@@ -32,7 +32,7 @@ export interface Spot {
   flop?: Act[];
   turn?: Act[];
   river?: Act[];
-  /** 프리플랍 라이브러리 포맷. 없으면 스택에 가장 가까운 mtt8-15/25/40/60 */
+  /** 프리플랍 라이브러리 포맷. 없으면 스택에 가장 가까운 mtt8-6/10/15/25/40/60 */
   format?: string;
 }
 export interface Option {
@@ -67,7 +67,7 @@ export interface DecideOptions {
   rng?: () => number;
 }
 
-const DEPTHS = [15, 25, 40, 60];
+const DEPTHS = [6, 10, 15, 25, 40, 60];
 const MIN_ITER = 10;
 const MAX_ITER = 1000;
 const STREETS = ["flop", "turn", "river"] as const;
@@ -187,7 +187,12 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
     else if (k < 0) {
       if (i !== hero) throw new Error(`${P[i]} 의 프리플랍 액션이 빠졌습니다`);
       if (reach[hero][cls] / CLASS_N[cls] < 0.01) note("이 핸드는 GTO 라인이라면 여기까지 오지 않습니다");
-      const options = nd.a.map((x, a) => ({ type: x[0], label: x[2], amount: x[1], freq: nd.s[a * NUM_CLASSES + cls] / 1000, ev: nd.e[a * NUM_CLASSES + cls] / 100 }));
+      // 표의 스택과 내 스택이 다를 수 있으니 올인·콜 금액은 실제 스택과 실제로 걸린 돈으로 보여 준다
+      const options = nd.a.map((x, a) => {
+        const amount = x[0] === "allin" ? spot.stack : x[0] === "call" ? Math.min(spot.stack, Math.max(...inv)) : Math.min(x[1], spot.stack);
+        const label = x[0] === "allin" ? `올인 ${amount}` : x[2].startsWith("콜") ? `콜 ${r2(Math.max(0, amount - inv[hero]))}` : x[2];
+        return { type: x[0], label, amount, freq: nd.s[a * NUM_CLASSES + cls] / 1000, ev: nd.e[a * NUM_CLASSES + cls] / 100 };
+      });
       return { street: "preflop", options, pick: choose(options, opts.rng), source: "library", format, ms: Date.now() - t0, notes };
     } else {
       const a = acts.splice(k, 1)[0];
