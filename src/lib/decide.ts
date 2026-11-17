@@ -60,7 +60,8 @@ export interface Decision {
   pick: number;
   /**
    * library = 미리 푼 표 조회, exploit = 상대 성향을 넣어 다시 계산한 프리플랍, street-solve = 그 자리에서 한 스트리트 솔브,
-   * allin-equity = 표에 없는 프리플랍 흐름(림프·올인 위 레이즈 등)에서 상대 레인지 대 승률과 메인팟으로 콜·폴드만 계산한 것
+   * allin-equity = 표에 없는 프리플랍 흐름(림프·올인 위 레이즈·표가 막은 4명째 자리 등)이나, 표가 폴드라 한 다자 올인을 다시 재 보니 콜이 이득인 경우에
+   * 상대 레인지 대 승률과 메인팟으로 콜·폴드만 계산한 것
    */
   source: "library" | "exploit" | "street-solve" | "allin-equity";
   format: string;
@@ -90,6 +91,8 @@ const STREETS = ["flop", "turn", "river"] as const;
 const REPLAY_MS = [400, 400];
 /** 실제 액션이 풀이에서 레인지의 이 비율보다 적게 나오면 "GTO 라인에 거의 없는 액션"으로 본다 */
 const RARE = 0.05;
+/** 프리플랍에서 내 핸드가 이 노드에 올 비율이 이보다 작으면 표의 빈도 대신 EV 로 고른다 */
+const OFF_LINE = 0.01;
 const r2 = (x: number) => Math.round(x * 100) / 100;
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 
@@ -125,7 +128,8 @@ function fullSolver(tree: GameTree, w0: Float32Array, w1: Float32Array): Sub {
 const cache = new Map<string, Sub>();
 
 function choose(options: Option[], rng?: () => number): number {
-  if (!rng) return options.reduce((b, o, i) => (o.freq > options[b].freq ? i : b), 0);
+  // 빈도가 같으면 0번(대개 폴드) 대신 EV 가 큰 쪽
+  if (!rng) return options.reduce((b, o, i) => (o.freq > options[b].freq || (o.freq === options[b].freq && o.ev > options[b].ev) ? i : b), 0);
   let x = rng();
   for (let i = 0; i < options.length; i++) if ((x -= options[i].freq) <= 0) return i;
   return options.length - 1;
@@ -164,6 +168,8 @@ function mapAction(node: DecisionNode, type: Act["type"], amount: number, allin:
 /** 표가 레인지를 좁혀 주지 못한 상대(표에 없는 액션)에게 두는 기본 레인지: 무작위 핸드 상대 승률 상위 이 비율 */
 const DEFAULT_TOP = 0.2;
 const EQUITY_SAMPLES = 2000;
+/** 표의 폴드를 콜로 뒤집을지 볼 때의 표본 수. 뒤집는 쪽은 오차에 더 엄격해야 한다 */
+const FLOOR_SAMPLES = 8000;
 
 /** 내 핸드 대 상대 여러 명(자리별 169 레인지, 콤보 수 단위 가중치)의 승률. 몬테카를로, 비김은 나눈다 */
 export function multiwayEquity(hero: number[], ranges: Float64Array[], samples = EQUITY_SAMPLES, rng: () => number = mulberry32(7)): number {
@@ -291,6 +297,16 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
   let node: PfLibNode | null = lib.nodes[0];
   let end = "";
   const folded = new Set(spot.preflop.filter((a) => a.type === "fold").map((a) => P.indexOf(a.pos)));
+  /** 자리 j 의 프리플랍 레인지. 표로 좁히지 못했거나(unmatched) 거의 비었으면 강한 핸드 기본 레인지 */
+  const rangeOf = (j: number, unmatched: boolean, eqm: Float32Array | Float64Array | null): Float64Array => {
+    let mass = 0;
+    for (let c = 0; c < NUM_CLASSES; c++) mass += reach[j][c];
+    if (!unmatched && mass / NUM_COMBOS >= 0.005) return reach[j];
+    note(`${P[j]} 의 레인지는 표로 좁히지 못해 무작위 핸드 상대 승률 상위 ${Math.round(DEFAULT_TOP * 100)}% 핸드로 봤습니다`);
+    return strongDefault(eqm);
+  };
+  /** 사이드팟: 각자 넣은 돈 중 내 총 투자(total)까지만 내가 이길 수 있다 */
+  const mainPotAt = (total: number) => r2(P.reduce((s, _, i) => s + (i === hero ? total : i >= first ? Math.min(inv[i], total) : 0), 0) + cfg.ante * spot.players);
   for (let guard = 0; node && guard < 80; guard++) {
     const nd: PfLibNode = node;
     const i = nd.p;
@@ -304,22 +320,60 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
       note(`${P[i]} 의 프리플랍 액션이 기록에 없어 폴드로 봤습니다`);
       ai = pass();
     } else if (k < 0) {
-      if (reach[hero][cls] / CLASS_N[cls] < 0.01) note("이 핸드는 GTO 라인이라면 여기까지 오지 않습니다");
+      // 표는 자발적 참여를 3명까지만 만들어서, 4명째 자리에는 폴드 하나만 있다. AA 로도 폴드가 나왔다 → 아래 표 밖 흐름에서 승률로 계산
+      if (nd.a.every((x) => x[0] === "fold")) {
+        note("표가 4명 이상 팟을 만들지 않아 이 자리에는 폴드밖에 없습니다. 표 밖 흐름으로 보고 계산했습니다");
+        node = null;
+        break;
+      }
+      // GTO 라인이 오지 않는 노드에서는 표에 저장된 이 핸드의 빈도가 학습되지 않은 균등값(폴드 50%·콜 50% 등)이다. EV 는 상대 전략으로 계산된 값이라 쓸 수 있다
+      const offLine = reach[hero][cls] / CLASS_N[cls] < OFF_LINE;
+      if (offLine) note("이 핸드는 GTO 라인이라면 여기까지 오지 않습니다");
       // 표의 스택과 내 스택이 다를 수 있으니 올인·콜 금액은 실제 스택과 실제로 걸린 돈으로 보여 준다
       const options = nd.a.map((x, a) => {
         const amount = x[0] === "allin" ? spot.stack : x[0] === "call" ? Math.min(spot.stack, Math.max(...inv)) : Math.min(x[1], spot.stack);
         const label = x[0] === "allin" ? `올인 ${amount}` : x[2].startsWith("콜") ? `콜 ${r2(Math.max(0, amount - inv[hero]))}` : x[2];
         return { type: x[0], label, amount, freq: nd.s[a * NUM_CLASSES + cls] / 1000, ev: nd.e[a * NUM_CLASSES + cls] / 100 };
       });
-      if (!exploit) return { street: "preflop", options, pick: choose(options, opts.rng), source: "library", format, ms: Date.now() - t0, notes };
-      // 상대가 GTO 가 아니라고 알려 줬으면 표의 빈도 대신, 그 상대에게 EV 가 가장 큰 액션을 고른다
-      if (!opts.eq) throw new Error("상대 성향(reads)을 쓰려면 에퀴티 행렬을 주는 eq 가 필요합니다");
-      const ev = exploitEVs(lib, await opts.eq(), nd, reach, readOf);
-      options.forEach((o, a) => (o.ev = Math.round(ev[a * NUM_CLASSES + cls] * 100) / 100));
-      const best = options.reduce((b, o, a) => (o.ev > options[b].ev ? a : b), 0);
-      options.forEach((o, a) => (o.freq = a === best ? 1 : 0));
-      note("상대 성향(reads)을 넣어 EV 가 가장 큰 액션을 골랐습니다. 빈도는 GTO 빈도가 아닙니다");
-      return { street: "preflop", options, pick: best, source: "exploit", format, ms: Date.now() - t0, notes };
+      const bestEv = () => {
+        const best = options.reduce((b, o, a) => (o.ev > options[b].ev ? a : b), 0);
+        options.forEach((o, a) => (o.freq = a === best ? 1 : 0));
+        return best;
+      };
+      let pick: number;
+      let source: Decision["source"] = "library";
+      if (exploit) {
+        // 상대가 GTO 가 아니라고 알려 줬으면 표의 빈도 대신, 그 상대에게 EV 가 가장 큰 액션을 고른다
+        if (!opts.eq) throw new Error("상대 성향(reads)을 쓰려면 에퀴티 행렬을 주는 eq 가 필요합니다");
+        const ev = exploitEVs(lib, await opts.eq(), nd, reach, readOf);
+        options.forEach((o, a) => (o.ev = Math.round(ev[a * NUM_CLASSES + cls] * 100) / 100));
+        pick = bestEv();
+        source = "exploit";
+        note("상대 성향(reads)을 넣어 EV 가 가장 큰 액션을 골랐습니다. 빈도는 GTO 빈도가 아닙니다");
+      } else if (offLine) {
+        pick = bestEv();
+        note("표의 빈도는 이 핸드가 오지 않는 자리라 학습되지 않은 값이어서, EV 가 가장 큰 액션을 골랐습니다. 빈도는 GTO 빈도가 아닙니다");
+      } else pick = choose(options, opts.rng);
+
+      // 여러 명이 돈을 넣은 올인: 표는 3명 넘게 걸린 올인을 쌍별 승률 곱으로 근사해 강한 핸드를 깎는다(AA 콜이 −EV 로 적힌 노드가 있었다, 2026-11-17).
+      // 돈을 넣은 상대가 모두 넣은 돈만 들고 쇼다운까지 간다고 보는 보수적인 승률 계산으로도 콜이 이득이면 폴드하지 않는다. 콜을 폴드로 바꾸지는 않는다
+      const callAt = options.findIndex((o) => o.type === "call");
+      const committed = P.map((_, j) => j).filter((j) => j >= first && j !== hero && !folded.has(j) && spot.preflop.some((a) => a.pos === P[j] && (a.type === "call" || a.type === "raise")));
+      if (options[pick].type === "fold" && callAt >= 0 && Math.max(...inv) >= spot.stack - 0.01 && committed.length >= 2) {
+        const eqm = opts.eq ? await opts.eq() : null;
+        const total = Math.min(spot.stack, Math.max(...inv));
+        const pot = mainPotAt(total);
+        const ev = r2(multiwayEquity(hc, committed.map((j) => rangeOf(j, false, eqm)), FLOOR_SAMPLES) * pot - (total - inv[hero]));
+        // 표본 오차(승률 표준오차 약 0.55%)의 두 배 넘게 이득일 때만 표를 뒤집는다
+        if (ev > pot * 0.011) {
+          options[callAt].ev = ev;
+          options.forEach((o, a) => (o.freq = a === callAt ? 1 : 0));
+          pick = callAt;
+          source = "allin-equity";
+          note(`${committed.length + 1}명이 걸린 올인은 표의 근사가 강한 핸드를 낮게 봐서, 실제 승률로 다시 쟀더니 콜이 이득(${ev}bb)이라 콜로 바꿨습니다. 아직 행동하지 않은 뒷자리는 폴드한다고 봤습니다`);
+        }
+      }
+      return { street: "preflop", options, pick, source, format, ms: Date.now() - t0, notes };
     } else {
       const a = acts.splice(k, 1)[0];
       if (a.type === "call") inv[i] = Math.min(spot.stack, Math.max(...inv));
@@ -368,18 +422,14 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
       note("림프 팟처럼 표에 없는 흐름이라 체크로 둡니다. 레이즈가 나은지는 표로 판단할 수 없습니다");
       return { street: "preflop", options: [{ type: "check", label: "체크", amount: inv[hero], freq: 1, ev: 0 }], pick: 0, source: "allin-equity", format, ms: Date.now() - t0, notes };
     }
-    const live = P.map((_, i) => i).filter((i) => i >= first && i !== hero && !folded.has(i));
+    // 아직 행동하지 않은 자리(내 뒤)는 폴드한다고 본다. 예전에는 아무 패로나 콜하는 상대로 넣어서, 4명째 자리의 AA 승률을 7명 상대 32% 로 잡고 폴드했다
+    const acted = new Set(spot.preflop.filter((a) => a.type !== "fold").map((a) => P.indexOf(a.pos)));
+    const seated = P.map((_, i) => i).filter((i) => i >= first && i !== hero && !folded.has(i));
+    const live = seated.filter((i) => acted.has(i));
+    if (live.length < seated.length) note(`아직 행동하지 않은 ${seated.filter((i) => !acted.has(i)).map((i) => P[i]).join(", ")} 은 폴드한다고 봤습니다`);
     const eq = opts.eq ? await opts.eq() : null;
-    const ranges = live.map((i) => {
-      let mass = 0;
-      for (let c = 0; c < NUM_CLASSES; c++) mass += reach[i][c];
-      if (!unmatched.has(i) && mass / NUM_COMBOS >= 0.005) return reach[i];
-      note(`${P[i]} 의 레인지는 표로 좁히지 못해 무작위 핸드 상대 승률 상위 ${Math.round(DEFAULT_TOP * 100)}% 핸드로 봤습니다`);
-      return strongDefault(eq);
-    });
-    const equity = multiwayEquity(hc, ranges);
-    // 사이드팟: 각자 넣은 돈 중 내 총 투자(total)까지만 내가 이길 수 있다
-    const mainPot = r2(P.reduce((s, _, i) => s + (i === hero ? total : i >= first ? Math.min(inv[i], total) : 0), 0) + cfg.ante * spot.players);
+    const equity = multiwayEquity(hc, live.map((i) => rangeOf(i, unmatched.has(i), eq)));
+    const mainPot = mainPotAt(total);
     const ev = r2(equity * mainPot - toCall);
     const call = ev > 0;
     const options: Option[] = [

@@ -142,6 +142,49 @@ describe.skipIf(!lib || !has("mtt8-10") || !existsSync(eqFile))("decide — 표 
   });
 });
 
+describe.skipIf(!has("mtt8-6") || !has("mtt8-15") || !existsSync(eqFile))("decide — 이상한 자리에서 AA·KK 가 폴드하지 않는다", () => {
+  // 2026-11-17 사용자 신고. GTO 라인 밖 노드는 그 핸드의 빈도가 학습되지 않아 균등값(폴드 50%·콜 50%)으로 남아 있고,
+  // 표가 4명째 참여를 막은 노드는 폴드 하나뿐이었다
+  const offLine = [...folds("UTG", "UTG1", "LJ", "HJ", "CO"), { pos: "BTN", type: "raise" as const, to: 2 }, { pos: "SB", type: "call" as const }, { pos: "BB", type: "raise" as const, allin: true }, ...folds("BTN")];
+  const fourth = [...folds("UTG", "UTG1", "LJ", "HJ"), { pos: "CO", type: "raise" as const, allin: true }, { pos: "BTN", type: "call" as const }, { pos: "SB", type: "call" as const }];
+  for (const cards of ["AsAh", "KsKh"]) {
+    it(`${cards}: SB 로 콜했다가 BB 올인을 받으면 빈도 대신 EV 로 콜한다 (빈도대로 뽑아도)`, async () => {
+      const d = await decide({ players: 8, hero: "SB", cards, stack: 15, preflop: offLine }, { preflop: byId, rng: () => 0.1 });
+      expect(d.options[d.pick].type).toBe("call");
+      expect(freqOf(d, "fold")).toBe(0);
+      expect(d.notes.join(" ")).toContain("EV 가 가장 큰");
+    });
+
+    it(`${cards}: 표가 막은 4명째 자리(6bb BB, CO 올인·BTN 콜·SB 콜)에서 폴드만 답하지 않고 승률로 콜한다`, async () => {
+      const d = await decide({ players: 8, hero: "BB", cards, stack: 6, preflop: fourth }, { preflop: byId, eq });
+      expect(d.source).toBe("allin-equity");
+      expect(d.options[d.pick].type).toBe("call");
+      expect(d.options.find((o) => o.type === "call")!.amount).toBe(6);
+    });
+  }
+
+  it("10bb CO AA: 오픈·콜·콜 뒤 HJ 올인 — 아직 행동 안 한 BTN·SB·BB 를 콜하는 상대로 세지 않는다", async () => {
+    const pre = [{ pos: "UTG", type: "raise" as const, to: 2 }, { pos: "UTG1", type: "call" as const }, { pos: "LJ", type: "call" as const }, { pos: "HJ", type: "raise" as const, allin: true }];
+    const d = await decide({ players: 8, hero: "CO", cards: "AsAh", stack: 10, preflop: pre }, { preflop: byId, eq });
+    expect(d.options[d.pick].type).toBe("call");
+    expect(d.notes.join(" ")).toContain("아직 행동하지 않은 BTN, SB, BB 은 폴드");
+  });
+
+  it("40bb SB KK: 4벳 뒤 BB 5벳 올인·HJ 콜 — 표의 다자 올인 근사가 폴드라 해도 실제 승률로 콜", async () => {
+    const pre = [{ pos: "UTG", type: "fold" as const }, { pos: "UTG1", type: "raise" as const, to: 2.2 }, { pos: "LJ", type: "fold" as const }, { pos: "HJ", type: "raise" as const, to: 6.16 }, ...folds("CO", "BTN"), { pos: "SB", type: "raise" as const, to: 13.55 }, { pos: "BB", type: "raise" as const, allin: true }, { pos: "UTG1", type: "fold" as const }, { pos: "HJ", type: "call" as const }];
+    const lib40 = await byId("mtt8-40");
+    const d = await decide({ players: 8, hero: "SB", cards: "KsKh", stack: 40, preflop: pre }, { preflop: async () => lib40, eq });
+    expect(d.source).toBe("allin-equity");
+    expect(d.options[d.pick].type).toBe("call");
+    expect(d.notes.join(" ")).toContain("실제 승률로 다시");
+  });
+
+  it("72o 는 같은 4명째 자리에서 여전히 폴드", async () => {
+    const d = await decide({ players: 8, hero: "BB", cards: "7s2h", stack: 6, preflop: fourth }, { preflop: byId, eq });
+    expect(d.options[d.pick].type).toBe("fold");
+  });
+});
+
 describe.skipIf(!has("mtt8-6") || !has("mtt8-10"))("decide — 짧은 스택 (15bb 미만)", () => {
   const toBtn = folds("UTG", "UTG1", "LJ", "HJ", "CO");
 
