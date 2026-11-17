@@ -2,7 +2,7 @@
 // 판단 품질과 실제 승패를 섞지 않는다: outcome(사후 결과)은 decisions 계산에 쓰이지 않는다.
 import { COMBO_CLASS, NUM_CLASSES, comboIndex, parseCard } from "../engine/cards";
 import { CLASS_N } from "../lib/preflopLib";
-import { Cancelled, closedAllin, isClosedAfterCall, type ClosedResult } from "./allin-ev";
+import { Cancelled, closedAllin, isClosedAfterCall, isRiverCallClosing, type ClosedResult } from "./allin-ev";
 import { canonicalJson, sha256Hex } from "./hand-history";
 import { analyzeIcm } from "./icm-analysis";
 import { decisionViews, type DecisionView } from "./knowledge";
@@ -213,7 +213,10 @@ async function analyzeDecision(view: DecisionView, options: AnalyzeOptions, deps
 
   // ---- 2) 닫힌 올인: 콜하면 더 베팅이 없는 상황. 상대 범위 출처가 있어야 계산 ----
   const callAdd = view.legal.callAdd;
-  const closed = callAdd > 0 && isClosedAfterCall(view.state, view.seat, callAdd);
+  const allinClosed = callAdd > 0 && isClosedAfterCall(view.state, view.seat, callAdd);
+  // 리버에서 내 콜로 베팅이 끝나는 경우도 결과가 카드로만 정해진다. 다만 레이즈가 가능할 수 있어 콜·폴드만 비교한다
+  const riverClose = !allinClosed && isRiverCallClosing(view.state, view.seat, callAdd);
+  const closed = allinClosed || riverClose;
   if (closed) {
     const traces: RangeTrace[] = [];
     const opps: Array<{ seat: number; weights: Float32Array }> = [];
@@ -254,7 +257,7 @@ async function analyzeDecision(view: DecisionView, options: AnalyzeOptions, deps
         if (e instanceof Cancelled) throw e;
         reason("range", (e as Error).message);
       }
-      if (res) applyClosed(d, view, res, traces, options, cats);
+      if (res) applyClosed(d, view, res, traces, options, cats, riverClose && view.legal.canRaise);
     }
   } else if (d.method === "none") {
     if (view.street !== "preflop") reason("data", "포스트플랍 전략 풀이는 이 복기 도구에 넣지 않았습니다. 이후 베팅이 남은 결정이라 팟 오즈만으로 EV 를 정할 수 없습니다 (MODEL-LIMITATIONS.md)");
@@ -277,7 +280,7 @@ function libraryVerdict(opts: OptionView[], actual: number, offLine: boolean, ha
   return { kind: "ev-loss" as const, evLoss: diff, text: `자료 모델 기준 ${opts[best].label} 보다 ${diff.toFixed(2)}BB 낮습니다` };
 }
 
-function applyClosed(d: DecisionAnalysis, view: DecisionView, res: ClosedResult, traces: RangeTrace[], options: AnalyzeOptions, cats: Set<IssueCategory>) {
+function applyClosed(d: DecisionAnalysis, view: DecisionView, res: ClosedResult, traces: RangeTrace[], options: AnalyzeOptions, cats: Set<IssueCategory>, raiseOpen: boolean) {
   const unit = view.unit === "bb" ? "BB" : "칩";
   const bb = view.bigBlind;
   const ev = res.evCall / 1000;
@@ -295,19 +298,22 @@ function applyClosed(d: DecisionAnalysis, view: DecisionView, res: ClosedResult,
   d.evUnit = `${unit} · 이 시점에서 폴드 = 0 · 상대 범위: ${src}`;
   d.options = [
     { label: "폴드", type: "fold", freq: null, ev: 0, evSe: 0, isActual: view.actual?.type === "fold" },
-    { label: `콜 +${view.legal.callAdd}${view.unit === "bb" ? "BB" : ""}`, type: "call", add: view.legal.callAdd, freq: null, ev, evSe: se, isActual: view.actual?.type === "call" }
+    { label: `콜 +${view.legal.callAdd}${view.unit === "bb" ? "BB" : ""}`, type: "call", add: view.legal.callAdd, freq: null, ev, evSe: se, isActual: view.actual?.type === "call" },
+    ...(raiseOpen ? [{ label: "레이즈 (계산 안 함)", type: "raise", freq: null, ev: null, isActual: view.actual?.type === "raise" }] : [])
   ];
   d.ranges = traces;
-  d.quality = { ms: 0, method: res.method === "enumeration" ? "닫힌 올인 · 전부 열거" : "닫힌 올인 · 표본", samples: res.samples, seed: options.seed, enumeration: res.method === "enumeration", notes: [qnote] };
-  d.assumptions.push("내가 콜하면 이후 베팅 결정이 없어 결과가 카드로만 정해지는 상황입니다(최적 대응 = EV 가 0보다 크면 콜)");
+  d.quality = { ms: 0, method: `${raiseOpen ? "리버 콜(베팅 종료)" : "닫힌 올인"} · ${res.method === "enumeration" ? "전부 열거" : "표본"}`, samples: res.samples, seed: options.seed, enumeration: res.method === "enumeration", notes: [qnote] };
+  d.assumptions.push(raiseOpen ? "리버에서 내 콜로 베팅이 끝나 결과가 카드로만 정해지는 상황입니다. 콜과 폴드 둘만 비교합니다" : "내가 콜하면 이후 베팅 결정이 없어 결과가 카드로만 정해지는 상황입니다(최적 대응 = EV 가 0보다 크면 콜)");
+  if (raiseOpen) d.limitations.push("레이즈 선택지는 풀지 않았습니다. 레이즈가 콜·폴드보다 나을 수 있어 이 판정은 '콜과 폴드 중'에 대한 것입니다");
   if (traces.some((t) => t.source === "user")) d.assumptions.push("상대 범위 중 사용자 가정이 있습니다. 가정이 바뀌면 결론이 바뀝니다");
   if (view.street !== "preflop" && traces.some((t) => t.source === "library")) d.limitations.push("자료 범위는 프리플랍 액션으로만 좁혔고 플랍 이후 액션은 반영하지 않았습니다");
   d.limitations.push("빈도는 계산하지 않습니다(두 선택지의 EV 만 비교). 칩 EV 이며 ICM 은 아래 대회 분석에서 따로 봅니다");
   const noise = Math.max(2 * se, 0.01 * (bb ?? 1));
   const evS = `${ev.toFixed(2)}${unit}${bb && view.unit !== "bb" ? ` (${(ev / bb).toFixed(2)}BB)` : ""}`;
-  if (!view.actual) d.verdict = { kind: "unknown", text: `기록이 이 판단에서 끝나 실제 선택이 없습니다. 콜 EV ${evS}` };
+  if (view.actual && view.actual.type !== "call" && view.actual.type !== "fold") d.verdict = { kind: "unknown", text: `실제 선택(레이즈)의 EV 는 계산하지 않아 판정하지 않습니다. 참고: 콜 EV ${evS}` };
+  else if (!view.actual) d.verdict = { kind: "unknown", text: `기록이 이 판단에서 끝나 실제 선택이 없습니다. 콜 EV ${evS}` };
   else if (Math.abs(ev) <= noise) d.verdict = { kind: "within-noise", text: `콜 EV ${evS} 가 오차 범위(±${noise.toFixed(2)}) 안이라 어느 쪽도 실수로 표시하지 않습니다` };
-  else if ((view.actual.type === "call") === ev > 0) d.verdict = { kind: "best", text: `칩 EV 기준 맞는 선택입니다 (콜 EV ${evS})` };
+  else if ((view.actual.type === "call") === ev > 0) d.verdict = { kind: "best", text: `칩 EV 기준 ${raiseOpen ? "콜·폴드 중 " : ""}맞는 선택입니다 (콜 EV ${evS})` };
   else {
     d.verdict = { kind: "ev-loss", evLoss: Math.abs(ev), text: `칩 EV 기준 ${ev > 0 ? "콜" : "폴드"}보다 ${Math.abs(ev).toFixed(2)}${unit} 낮습니다 (범위: ${src})` };
     cats.add("ev");

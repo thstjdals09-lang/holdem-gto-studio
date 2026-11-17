@@ -10,7 +10,14 @@
     "test": "vitest run",
     "decide": "esbuild scripts/decide.ts --bundle --platform=node --format=esm --log-level=warning --outfile=.cache/decide.mjs && node .cache/decide.mjs",
     "sdk:build": "tsc -p sdk && node sdk/build.mjs",
-    "sdk:pack": "npm run sdk:build && cd sdk && npm pack --pack-destination ../release"
+    "sdk:pack": "npm run sdk:build && cd sdk && npm pack --pack-destination ../release",
+    "review:dev": "vite --config vite.review.config.ts",
+    "review:build": "tsc --noEmit -p tsconfig.json && vite build --config vite.review.config.ts",
+    "review:preview": "vite preview --config vite.review.config.ts",
+    "review:test": "vitest run tests/review/",
+    "review:provenance": "node scripts/review-provenance.mjs",
+    "review:zip": "node scripts/review-zip.mjs",
+    "review:e2e": "node scripts/review-e2e.mjs"
   },
   "dependencies": {
     "react": "18.3.1",

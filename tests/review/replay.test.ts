@@ -177,6 +177,17 @@ describe("팟·사이드팟·환급·칩 보존", () => {
     expect(layers.map((l) => [l.amount / 1000, l.eligible.sort()])).toEqual([[2, [2, 3]], [101, [2, 3]]]);
     expect(layers.reduce((a, l) => a + l.amount, 0) / 1000).toBe(103);
   });
+  it("앤티로 스택이 0 이 된 BB 는 블라인드 없이 올인이고, 다른 자리는 BB 크기를 맞춘다", () => {
+    const h = mk({ stacks: [100, 2, 100], button: 3, bbAnte: 2, bb: 2, sb: 1 });
+    h.forced = h.forced.filter((f) => f.kind !== "bb"); // 낸 것은 앤티뿐
+    const r = replay(h);
+    expect(errors(r)).toEqual([]);
+    expect(r.issues.map((i) => i.code)).toContain("bb-ante-allin");
+    expect(r.final!.seats.find((s) => s.seat === 2)!.allIn).toBe(true);
+    expect(r.pending?.legal.toCall).toBe(2);
+    const noSize = replay({ ...h, bigBlind: null });
+    expect(errors(noSize)[0].code).toBe("no-bb-size");
+  });
   it("아무도 맞추지 않은 초과 베팅은 돌려준다 (헤즈업 리버)", () => {
     const acts = [A("preflop", 1, "call"), A("preflop", 2, "check"), A("flop", 2, "check"), A("flop", 1, "check"), A("turn", 2, "check"), A("turn", 1, "check"), A("river", 2, "bet", { to: 150, allIn: false }), A("river", 1, "call")];
     const r = replay(mk({ stacks: [60, 200], button: 1, actions: acts }));

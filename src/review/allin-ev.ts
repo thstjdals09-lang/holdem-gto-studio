@@ -67,6 +67,14 @@ export function isClosedAfterCall(state: StateView, heroSeat: number, callAdd: n
   return others.length + (heroLeft ? 1 : 0) <= 1;
 }
 
+/** 리버에서 내 콜로 베팅이 끝나는지 (뒤에 행동할 자리가 없음). 이때도 레이즈는 가능할 수 있어 콜·폴드만 비교한다 */
+export function isRiverCallClosing(state: StateView, heroSeat: number, callAdd: number): boolean {
+  if (state.street !== "river" || !(callAdd > 0)) return false;
+  const hero = state.seats.find((s) => s.seat === heroSeat);
+  if (!hero || hero.folded) return false;
+  return !state.seats.some((s) => s.seat !== heroSeat && !s.folded && !s.allIn && s.streetIn < state.currentBet - 1e-9);
+}
+
 /** 폴드했을 때: 맞춰지지 않은 최고 투자액의 초과분은 돌려준다 */
 function foldEntries(entries: Entry[], heroSeat: number): Entry[] {
   const e = entries.map((x) => (x.seat === heroSeat ? { ...x, folded: true } : { ...x }));
@@ -115,11 +123,11 @@ export async function closedAllin(input: ClosedInput, opts: RunOptions): Promise
   const callAgg = new Map<string, Outcome>();
   const foldAgg = new Map<string, Outcome>();
   const add = (agg: Map<string, Outcome>, stacks: number[], w: number) => {
-    const r = stacks.map((x) => Math.round(x));
-    const k = r.join(",");
+    // 키만 반올림해 같은 결과를 묶고, 값은 나눈 그대로 둔다 (반올림하면 나눈 팟에서 칩이 생길 수 있다)
+    const k = stacks.map((x) => Math.round(x)).join(",");
     const o = agg.get(k);
     if (o) o.prob += w;
-    else agg.set(k, { prob: w, stacks: r });
+    else agg.set(k, { prob: w, stacks: stacks.slice() });
   };
   const heroI = seatIdx.get(heroSeat)!;
   const heroStackAfterCall = call[heroI].stack;

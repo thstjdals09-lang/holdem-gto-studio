@@ -203,7 +203,13 @@ export function replay(hand: HandRecord): ReplayResult {
     if (s.stack === 0) s.allIn = true;
   }
   if (hand.forced.some((f) => f.kind === "ante") && hand.forced.some((f) => f.kind === "bb-ante")) warn("format", "ante-mixed", "개인 앤티와 BB 앤티가 함께 기록됐습니다");
-  if (!kinds.has("bb")) err("missing", "no-bb", "BB 게시 기록이 없습니다");
+  if (!kinds.has("bb")) {
+    // 앤티를 먼저 내서 스택이 0 이 된 BB 는 블라인드를 못 낸다 (규칙상 정상). 그때는 BB 크기를 따로 알아야 한다
+    const bbEmpty = bySeat.get(base.bbSeat!)!.stack === 0;
+    if (!bbEmpty) err("missing", "no-bb", "BB 게시 기록이 없습니다");
+    else if (hand.bigBlind === null) err("missing", "no-bb-size", "BB 가 앤티로 올인해 블라인드를 못 냈습니다. 이때는 bigBlind(BB 크기)가 필요합니다");
+    else warn("amount", "bb-ante-allin", `${label(base.bbSeat!)} 가 앤티로 올인해 BB 를 내지 못했습니다`);
+  }
   if (!kinds.has("sb")) warn("missing", "no-sb", "SB 게시 기록이 없습니다 (SB 없이 진행)");
   if (hasError()) return base;
   const bbSeatObj = bySeat.get(base.bbSeat!)!;
@@ -519,6 +525,10 @@ export function replay(hand: HandRecord): ReplayResult {
   const startSum = seats.reduce((a, s) => a + s.start, 0);
   const nowSum = seats.reduce((a, s) => a + s.stack + s.totalIn, 0);
   if (startSum !== nowSum) err("amount", "conservation", `칩 보존 실패: 시작 ${fromMilli(startSum)} ≠ 남은 스택+팟 ${fromMilli(nowSum)}`);
+  // 팟 층의 합은 팟 전체와 같아야 한다 (층 나누기에서 돈이 새거나 생기지 않는지)
+  const layered = potLayersMilli(base.finalMilli).reduce((a, l) => a + l.amount, 0);
+  const potSum = seats.reduce((a, s) => a + s.totalIn, 0);
+  if (layered !== potSum) err("amount", "pot-layers", `팟 층의 합 ${fromMilli(layered)} 이 팟 ${fromMilli(potSum)} 과 다릅니다`);
   base.ok = !hasError();
   return base;
 }

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { validateHand } from "../../src/review/hand-history";
 import { aggregate, analyzeHand } from "../../src/review/review-report";
 import { loadLibraryFromText, type LibraryLoader } from "../../src/review/strategy-provider";
-import { DEFAULT_OPTIONS, type HandRecord, type HandReport } from "../../src/review/types";
+import { DEFAULT_OPTIONS, HAND_SCHEMA, type ActionRecord, type HandRecord, type HandReport } from "../../src/review/types";
 
 const libs = new Map<string, ReturnType<typeof loadLibraryFromText>>();
 const loader: LibraryLoader = (id) => {
@@ -146,6 +146,69 @@ describe("사용자 사례 2: A2 새틀라이트 리버 큰 베팅 콜", () => {
     const river = r.decisions.at(-1)!;
     expect(river.icm).toBeUndefined();
     expect(river.icmUnavailable).toContain("전체 필드");
+  });
+});
+
+describe("리버에서 내 콜로 베팅이 끝나는 판단", () => {
+  // 헤즈업 칩: 리버까지 체크, 상대 100 벳(400 남음). 상대 범위 가정 QQ(이김 6콤보)·54s(짐 4콤보) → 내 승률 0.4
+  const river = (hero: ActionRecord | null): HandRecord => ({
+    schema: HAND_SCHEMA,
+    id: "river-call",
+    complete: hero !== null,
+    source: { kind: "manual" },
+    unit: "chips",
+    bigBlind: 2,
+    buttonSeat: 1,
+    seats: [{ seat: 1, stack: 600 }, { seat: 2, stack: 600 }],
+    hero: { seat: 1, cards: ["Ah", "Kh"] },
+    forced: [{ seat: 1, kind: "sb", amount: 1 }, { seat: 2, kind: "bb", amount: 2 }],
+    actions: [
+      { street: "preflop", seat: 1, type: "call" }, { street: "preflop", seat: 2, type: "check" },
+      { street: "flop", seat: 2, type: "check" }, { street: "flop", seat: 1, type: "check" },
+      { street: "turn", seat: 2, type: "check" }, { street: "turn", seat: 1, type: "check" },
+      { street: "river", seat: 2, type: "bet", to: 100 },
+      ...(hero ? [hero, ...(hero.type === "raise" ? [{ street: "river" as const, seat: 2, type: "fold" as const }] : [])] : [])
+    ],
+    board: { flop: ["2c", "7d", "9s"], turn: "Jc", river: "3h" },
+    assumptions: { ranges: { "2": "QQ,54s" } }
+  });
+  it("콜 EV = 0.4 × 204 − 100 = −18.4 (전부 열거), 레이즈는 계산하지 않았다고 표시", async () => {
+    const r = await run(river({ street: "river", seat: 1, type: "call" }));
+    const d = r.decisions.at(-1)!;
+    expect(d.status).toBe("approximate");
+    expect(d.options.find((o) => o.type === "call")!.ev).toBeCloseTo(-18.4, 9);
+    expect(d.options.find((o) => o.type === "raise")).toMatchObject({ ev: null, freq: null });
+    expect(d.verdict.kind).toBe("ev-loss");
+    expect(d.verdict.evLoss).toBeCloseTo(18.4, 9);
+    expect(d.limitations.join()).toContain("레이즈 선택지는 풀지 않았습니다");
+  });
+  it("실제로 레이즈했으면 판정하지 않는다", async () => {
+    const r = await run(river({ street: "river", seat: 1, type: "raise", to: 300 }));
+    const d = r.decisions.at(-1)!;
+    expect(d.verdict.kind).toBe("unknown");
+    expect(d.options.find((o) => o.isActual)?.type).toBe("raise");
+  });
+  it("뒤에 행동할 자리가 남은 리버 콜은 계산하지 않는다", async () => {
+    const h = river(null);
+    h.seats.push({ seat: 3, stack: 600 });
+    h.buttonSeat = 3;
+    h.forced = [{ seat: 1, kind: "sb", amount: 1 }, { seat: 2, kind: "bb", amount: 2 }];
+    h.actions = [
+      { street: "preflop", seat: 3, type: "call" }, { street: "preflop", seat: 1, type: "call" }, { street: "preflop", seat: 2, type: "check" },
+      { street: "flop", seat: 1, type: "check" }, { street: "flop", seat: 2, type: "check" }, { street: "flop", seat: 3, type: "check" },
+      { street: "turn", seat: 1, type: "check" }, { street: "turn", seat: 2, type: "check" }, { street: "turn", seat: 3, type: "check" },
+      { street: "river", seat: 1, type: "check" }, { street: "river", seat: 2, type: "bet", to: 100 }
+    ];
+    h.hero = { seat: 1, cards: ["Ah", "Kh"] };
+    h.assumptions = { ranges: { "2": "QQ,54s", "3": "65s,T8s" } };
+    // 3번이 먼저 콜했으면 내 콜로 베팅이 끝난다
+    h.actions.push({ street: "river", seat: 3, type: "call" });
+    const r = await run(h);
+    expect(r.decisions.at(-1)!.status).toBe("approximate"); // 3번이 이미 콜 → 내 콜로 끝남
+    h.actions.pop();
+    h.hero = { seat: 3, cards: ["Ah", "Kh"] };
+    const r2 = await run(h);
+    expect(r2.decisions.at(-1)!.status).toBe("unsupported"); // 내 뒤에 1번(체크한 자리)이 남음
   });
 });
 
