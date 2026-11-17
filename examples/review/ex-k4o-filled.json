@@ -1,0 +1,34 @@
+{
+  "schema": "holdem-review-hand/1",
+  "id": "ex-k4o-filled",
+  "complete": true,
+  "source": { "kind": "example", "detail": "사용자 사례 1 보완 예시: 인원·스택·무늬·상대 범위는 사용자가 넣은 가정값. SB 140BB 셔브에 BB 가 K4o 로 128.875BB 추가 콜" },
+  "unit": "bb",
+  "bigBlind": 1,
+  "buttonSeat": 6,
+  "seats": [
+    { "seat": 1, "stack": 30.125 }, { "seat": 2, "stack": 22 }, { "seat": 3, "stack": 41 }, { "seat": 4, "stack": 18.5 },
+    { "seat": 5, "stack": 27 }, { "seat": 6, "stack": 33 }, { "seat": 7, "name": "셔브한 상대", "stack": 140 }, { "seat": 8, "name": "나", "stack": 130 }
+  ],
+  "hero": { "seat": 8, "cards": ["Kd", "4c"] },
+  "forced": [
+    { "seat": 1, "kind": "ante", "amount": 0.125 }, { "seat": 2, "kind": "ante", "amount": 0.125 }, { "seat": 3, "kind": "ante", "amount": 0.125 },
+    { "seat": 4, "kind": "ante", "amount": 0.125 }, { "seat": 5, "kind": "ante", "amount": 0.125 }, { "seat": 6, "kind": "ante", "amount": 0.125 },
+    { "seat": 7, "kind": "ante", "amount": 0.125 }, { "seat": 8, "kind": "ante", "amount": 0.125 },
+    { "seat": 7, "kind": "sb", "amount": 0.5 }, { "seat": 8, "kind": "bb", "amount": 1 }
+  ],
+  "actions": [
+    { "street": "preflop", "seat": 1, "type": "fold" },
+    { "street": "preflop", "seat": 2, "type": "fold" },
+    { "street": "preflop", "seat": 3, "type": "fold" },
+    { "street": "preflop", "seat": 4, "type": "fold" },
+    { "street": "preflop", "seat": 5, "type": "fold" },
+    { "street": "preflop", "seat": 6, "type": "fold" },
+    { "street": "preflop", "seat": 7, "type": "raise", "to": 139.875, "allIn": true },
+    { "street": "preflop", "seat": 8, "type": "call", "add": 128.875, "allIn": true }
+  ],
+  "board": { "flop": ["Jd", "8c", "2s"], "turn": "5h", "river": "Qc" },
+  "showdown": [{ "seat": 7, "cards": ["Ah", "7s"] }, { "seat": 8, "cards": ["Kd", "4c"] }],
+  "assumptions": { "ranges": { "7": "22+,A2+,K2s+,K7o+,Q8s+,QTo+,J9s+,JTo,T9s" } },
+  "notes": ["상대 범위는 사용자 가정입니다(GTO 범위 아님). 쇼다운 A7o 는 사후 정보라 범위·판단에 쓰지 않습니다"]
+}

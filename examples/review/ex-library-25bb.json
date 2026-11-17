@@ -1,0 +1,33 @@
+{
+  "schema": "holdem-review-hand/1",
+  "id": "ex-library-25bb",
+  "complete": true,
+  "source": { "kind": "example", "detail": "합성 예제: 8명 25BB 개인 앤티 — 자료 mtt8-25 조건과 정확히 같은 핸드. 결과는 졌지만 판단은 자료 기준 최선" },
+  "unit": "bb",
+  "bigBlind": 1,
+  "buttonSeat": 6,
+  "seats": [
+    { "seat": 1, "stack": 25.125 }, { "seat": 2, "stack": 25.125 }, { "seat": 3, "stack": 25.125 }, { "seat": 4, "stack": 25.125 },
+    { "seat": 5, "stack": 25.125 }, { "seat": 6, "name": "나", "stack": 25.125 }, { "seat": 7, "stack": 25.125 }, { "seat": 8, "stack": 25.125 }
+  ],
+  "hero": { "seat": 6, "cards": ["Ad", "Kc"] },
+  "forced": [
+    { "seat": 1, "kind": "ante", "amount": 0.125 }, { "seat": 2, "kind": "ante", "amount": 0.125 }, { "seat": 3, "kind": "ante", "amount": 0.125 },
+    { "seat": 4, "kind": "ante", "amount": 0.125 }, { "seat": 5, "kind": "ante", "amount": 0.125 }, { "seat": 6, "kind": "ante", "amount": 0.125 },
+    { "seat": 7, "kind": "ante", "amount": 0.125 }, { "seat": 8, "kind": "ante", "amount": 0.125 },
+    { "seat": 7, "kind": "sb", "amount": 0.5 }, { "seat": 8, "kind": "bb", "amount": 1 }
+  ],
+  "actions": [
+    { "street": "preflop", "seat": 1, "type": "fold" },
+    { "street": "preflop", "seat": 2, "type": "fold" },
+    { "street": "preflop", "seat": 3, "type": "fold" },
+    { "street": "preflop", "seat": 4, "type": "fold" },
+    { "street": "preflop", "seat": 5, "type": "fold" },
+    { "street": "preflop", "seat": 6, "type": "raise", "to": 2 },
+    { "street": "preflop", "seat": 7, "type": "fold" },
+    { "street": "preflop", "seat": 8, "type": "raise", "to": 25, "allIn": true },
+    { "street": "preflop", "seat": 6, "type": "call", "add": 23, "allIn": true }
+  ],
+  "board": { "flop": ["7c", "2d", "9h"], "turn": "Ts", "river": "3c" },
+  "showdown": [{ "seat": 8, "cards": ["Qs", "Qd"] }, { "seat": 6, "cards": ["Ad", "Kc"] }]
+}

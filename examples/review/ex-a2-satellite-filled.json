@@ -1,0 +1,37 @@
+{
+  "schema": "holdem-review-hand/1",
+  "id": "ex-a2-satellite-filled",
+  "complete": true,
+  "source": { "kind": "example", "detail": "사용자 사례 2 보완 예시: 블라인드 200/400 · BB 앤티 400, 6명, 앞선 액션·스택·지급 구조(티켓 3장)·상대 범위는 사용자가 넣은 가정값. 리버 팟 7,908 에 4,570 콜이 되도록 맞춤" },
+  "unit": "chips",
+  "bigBlind": 400,
+  "buttonSeat": 4,
+  "seats": [
+    { "seat": 1, "stack": 6000 }, { "seat": 2, "stack": 4500 }, { "seat": 3, "name": "베팅한 상대", "stack": 5939 },
+    { "seat": 4, "stack": 7000 }, { "seat": 5, "stack": 3000 }, { "seat": 6, "name": "나", "stack": 9000 }
+  ],
+  "hero": { "seat": 6, "cards": ["As", "2d"] },
+  "forced": [{ "seat": 6, "kind": "bb-ante", "amount": 400 }, { "seat": 5, "kind": "sb", "amount": 200 }, { "seat": 6, "kind": "bb", "amount": 400 }],
+  "actions": [
+    { "street": "preflop", "seat": 1, "type": "fold" },
+    { "street": "preflop", "seat": 2, "type": "fold" },
+    { "street": "preflop", "seat": 3, "type": "raise", "to": 900 },
+    { "street": "preflop", "seat": 4, "type": "fold" },
+    { "street": "preflop", "seat": 5, "type": "fold" },
+    { "street": "preflop", "seat": 6, "type": "call", "add": 500 },
+    { "street": "flop", "seat": 6, "type": "check" },
+    { "street": "flop", "seat": 3, "type": "check" },
+    { "street": "turn", "seat": 6, "type": "check" },
+    { "street": "turn", "seat": 3, "type": "bet", "to": 469 },
+    { "street": "turn", "seat": 6, "type": "call" },
+    { "street": "river", "seat": 6, "type": "check" },
+    { "street": "river", "seat": 3, "type": "bet", "to": 4570, "allIn": true },
+    { "street": "river", "seat": 6, "type": "call", "add": 4570 }
+  ],
+  "board": { "flop": ["4c", "Kc", "9h"], "turn": "Qh", "river": "9s" },
+  "showdown": [{ "seat": 3, "cards": ["Jh", "Th"] }, { "seat": 6, "cards": ["As", "2d"] }],
+  "snapshots": [{ "beforeAction": 13, "pot": 7908, "potKind": "total", "toCall": 4570, "label": "화면: 팟 7,908 · 콜 4,570" }],
+  "tournament": { "kind": "satellite", "payouts": [100, 100, 100], "otherStacks": [5000, 4000, 3000, 2500], "payoutUnit": "티켓 가치" },
+  "assumptions": { "ranges": { "3": "KK,QQ,99,44,AK,AQ,KQ,KJ,K9s,Q9s,JTs,T8s,J8s,A5s,A3s,76s" } },
+  "notes": ["상대 범위·지급 구조·테이블 밖 스택은 사용자 가정입니다. 쇼다운 JhTh 는 사후 정보라 판단에 쓰지 않습니다"]
+}

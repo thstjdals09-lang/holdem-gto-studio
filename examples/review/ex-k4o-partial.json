@@ -1,0 +1,17 @@
+{
+  "schema": "holdem-review-hand/1",
+  "id": "ex-k4o-partial",
+  "complete": true,
+  "source": { "kind": "example", "detail": "사용자 사례 1 원본(부분 사례): K4o 로 약 129BB 추가 올인 콜. 확인된 사실만 적었습니다" },
+  "unit": "bb",
+  "bigBlind": 1,
+  "buttonSeat": 1,
+  "seats": [{ "seat": 1, "name": "올인한 상대", "stack": null }, { "seat": 2, "name": "나", "stack": null }],
+  "hero": { "seat": 2, "cards": null },
+  "forced": [],
+  "actions": [],
+  "board": {},
+  "snapshots": [{ "beforeAction": 0, "toCall": 129, "label": "화면 기억: 약 129BB 추가 콜" }],
+  "missing": ["실제 인원·포지션", "초기 스택", "블라인드·앤티", "앞선 액션 순서", "내 카드 무늬(K4o 로만 확인)", "상대 셔브 범위의 출처"],
+  "notes": ["상대는 쇼다운에서 A7o 를 보였다고 합니다(무늬 미확인). 사후 정보라 판단 입력에 넣지 않습니다"]
+}

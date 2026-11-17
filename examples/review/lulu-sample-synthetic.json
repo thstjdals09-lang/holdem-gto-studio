@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "version": "0.5.0",
+  "events": [
+    {
+      "kind": "decision",
+      "id": 101,
+      "input": {
+        "hole": ["Ah", "Qd"],
+        "board": [],
+        "potBb": 2.5,
+        "toCallBb": 1,
+        "heroStackBb": 40,
+        "tournament": { "mode": "chipEV" },
+        "decisionHistory": {
+          "handKey": "G-synthetic:1",
+          "complete": true,
+          "players": 6,
+          "hero": "BTN",
+          "stack": 40,
+          "stacks": { "LJ": 20, "HJ": 31.5, "CO": 25, "BTN": 40, "SB": 18.5, "BB": 23 },
+          "preflop": [{ "pos": "LJ", "type": "fold" }, { "pos": "HJ", "type": "fold" }, { "pos": "CO", "type": "fold" }],
+          "flop": [], "turn": [], "river": [],
+          "notes": ["상대별 초기 스택은 관측한 잔여 스택+현재 투자액이며 선불 앤티는 팟의 별도 금액으로 처리합니다."]
+        }
+      },
+      "output": { "options": [{ "type": "fold", "label": "폴드" }, { "type": "raise", "label": "레이즈 2.2" }], "pick": 1, "source": "qualified-preflop" }
+    },
+    {
+      "kind": "decision",
+      "id": 102,
+      "input": {
+        "hole": ["Ah", "Qd"],
+        "board": ["Qs", "7d", "2c"],
+        "potBb": 5.4,
+        "toCallBb": 0,
+        "heroStackBb": 37.8,
+        "tournament": { "mode": "chipEV" },
+        "decisionHistory": {
+          "handKey": "G-synthetic:1",
+          "complete": true,
+          "players": 6,
+          "hero": "BTN",
+          "stack": 40,
+          "stacks": { "LJ": 20, "HJ": 31.5, "CO": 25, "BTN": 40, "SB": 18.5, "BB": 23 },
+          "preflop": [
+            { "pos": "LJ", "type": "fold" }, { "pos": "HJ", "type": "fold" }, { "pos": "CO", "type": "fold" },
+            { "pos": "BTN", "type": "raise", "to": 2.2 }, { "pos": "SB", "type": "fold" }, { "pos": "BB", "type": "call" }
+          ],
+          "flop": [{ "pos": "BB", "type": "check" }],
+          "turn": [], "river": [],
+          "notes": []
+        }
+      },
+      "output": { "options": [{ "type": "check", "label": "체크" }, { "type": "bet", "label": "벳 33%" }], "pick": 1, "source": "qualified-full-solve" }
+    },
+    { "kind": "execution", "id": 102, "ok": true }
+  ]
+}

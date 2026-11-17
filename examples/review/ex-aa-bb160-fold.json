@@ -1,0 +1,33 @@
+{
+  "schema": "holdem-review-hand/1",
+  "id": "ex-aa-bb160-fold",
+  "complete": true,
+  "source": { "kind": "example", "detail": "사용자 사례 3 보완 예시: AA 로 BB 160 을 낸 뒤 목표 320 레이즈에 폴드. 인원·스택·앤티는 자료 mtt8-25 조건에 맞춘 가정값(원래 기록에는 없음)" },
+  "unit": "chips",
+  "bigBlind": 160,
+  "buttonSeat": 6,
+  "seats": [
+    { "seat": 1, "stack": 4020 }, { "seat": 2, "stack": 4020 }, { "seat": 3, "stack": 4020 }, { "seat": 4, "stack": 4020 },
+    { "seat": 5, "stack": 4020 }, { "seat": 6, "stack": 4020 }, { "seat": 7, "stack": 4020 }, { "seat": 8, "name": "나", "stack": 4020 }
+  ],
+  "hero": { "seat": 8, "cards": ["Ah", "As"] },
+  "forced": [
+    { "seat": 1, "kind": "ante", "amount": 20 }, { "seat": 2, "kind": "ante", "amount": 20 }, { "seat": 3, "kind": "ante", "amount": 20 },
+    { "seat": 4, "kind": "ante", "amount": 20 }, { "seat": 5, "kind": "ante", "amount": 20 }, { "seat": 6, "kind": "ante", "amount": 20 },
+    { "seat": 7, "kind": "ante", "amount": 20 }, { "seat": 8, "kind": "ante", "amount": 20 },
+    { "seat": 7, "kind": "sb", "amount": 80 }, { "seat": 8, "kind": "bb", "amount": 160 }
+  ],
+  "actions": [
+    { "street": "preflop", "seat": 1, "type": "raise", "to": 320 },
+    { "street": "preflop", "seat": 2, "type": "fold" },
+    { "street": "preflop", "seat": 3, "type": "fold" },
+    { "street": "preflop", "seat": 4, "type": "fold" },
+    { "street": "preflop", "seat": 5, "type": "fold" },
+    { "street": "preflop", "seat": 6, "type": "fold" },
+    { "street": "preflop", "seat": 7, "type": "fold" },
+    { "street": "preflop", "seat": 8, "type": "fold" }
+  ],
+  "board": {},
+  "snapshots": [{ "beforeAction": 7, "toCall": 160, "label": "내 차례: 추가 콜 160 (목표 320)" }],
+  "notes": ["원래 사례에서 확인된 사실은 'BB 160 을 냄, 상대 목표 320 레이즈, AA 폴드' 뿐입니다. 나머지는 자료 조건에 맞춘 가정입니다"]
+}

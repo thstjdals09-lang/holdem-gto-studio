@@ -1,0 +1,17 @@
+{
+  "schema": "holdem-review-hand/1",
+  "id": "ex-a2-satellite-partial",
+  "complete": true,
+  "source": { "kind": "example", "detail": "사용자 사례 2 원본(부분 사례): 새틀라이트 리버 4c Kc 9h Qh 9s 에서 A2 로 팟 7,908 에 4,570 콜. 블라인드·스택·앞선 액션·지급 구조 없음" },
+  "unit": "chips",
+  "bigBlind": null,
+  "buttonSeat": 1,
+  "seats": [{ "seat": 1, "name": "베팅한 상대", "stack": null }, { "seat": 2, "name": "나", "stack": null }],
+  "hero": { "seat": 2, "cards": null },
+  "forced": [],
+  "actions": [],
+  "board": { "flop": ["4c", "Kc", "9h"], "turn": "Qh", "river": "9s" },
+  "snapshots": [{ "beforeAction": 0, "pot": 7908, "toCall": 4570, "label": "화면 기억: 팟 7,908 · 콜 4,570 (팟에 상대 벳이 들어 있는지 미확인)" }],
+  "missing": ["실제 인원·포지션", "블라인드·앤티", "초기 스택", "앞선 액션", "내 카드 무늬(A2 로만 확인)", "지급 구조·전체 필드 스택", "상대 범위의 출처"],
+  "notes": ["팟 7,908 이 상대 벳을 포함한 값이면 필요 승률은 4,570 / (7,908 + 4,570) = 36.6%, 포함하지 않은 값이면 4,570 / (7,908 + 4,570 × 2) = 27.0% 입니다. 어느 쪽인지 기록으로 정할 수 없습니다"]
+}
