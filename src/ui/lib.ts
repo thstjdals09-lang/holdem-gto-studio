@@ -35,6 +35,8 @@ export function findMatchup(fmt: string, codes: string[]): Matchup | null {
 }
 
 export const FORMAT_LIST = [
+  { id: "mtt8-6", name: "토너먼트 8맥스 6bb" },
+  { id: "mtt8-10", name: "토너먼트 8맥스 10bb" },
   { id: "mtt8-15", name: "토너먼트 8맥스 15bb" },
   { id: "mtt8-25", name: "토너먼트 8맥스 25bb" },
   { id: "mtt8-40", name: "토너먼트 8맥스 40bb" },

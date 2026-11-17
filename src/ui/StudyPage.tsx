@@ -238,7 +238,7 @@ function PreflopNodeView({ lib, node, reach, onAction }: { lib: PfLib; node: PfL
         </div>
         <div className="card col">
           <h3>{focus !== null ? `${classLabel(focus)} · ${CLASS_COMBOS[focus].length}콤보 (레인지 ${(weight[focus] * 100).toFixed(0)}%)` : "핸드 상세"}</h3>
-          {focus === null && <div className="muted">그리드의 핸드에 마우스를 올리세요.</div>}
+          {focus === null && <div className="muted">그리드의 핸드를 누르거나 마우스를 올리세요.</div>}
           {focus !== null && (
             <table className="tbl">
               <thead>

@@ -75,7 +75,7 @@ function ToolsPage() {
 function HomePage() {
   const go = (p: string) => (window.location.hash = p);
   const cards: Array<[string, string, string]> = [
-    ["/study", "스터디", "미리 풀어둔 토너먼트 솔루션을 바로 탐색합니다. 8맥스 앤티 15·25·40·60bb 프리플랍 전체 트리, 그리고 40bb 주요 매치업의 플랍·턴(리버는 즉석 재솔브)."],
+    ["/study", "스터디", "미리 풀어둔 토너먼트 솔루션을 바로 탐색합니다. 8맥스 앤티 6·10·15·25·40·60bb 프리플랍 전체 트리, 그리고 40bb 주요 매치업의 플랍·턴(리버는 즉석 재솔브)."],
     ["/trainer", "연습", "스택 깊이별 프리플랍 오픈·리셔브·대응 퀴즈, 그리고 미리 푼 40bb 스팟에서 GTO 상대와 핸드를 끝까지 플레이하며 결정마다 채점."],
     ["/analyze", "분석", "토너먼트 핸드 히스토리를 붙여넣으면 스택에 가장 가까운 솔루션으로 프리플랍·포스트플랍 결정을 채점합니다(정확/부정확/블런더, EV 손실)."],
     ["/reports", "리포트", "매치업별로 모든 플랍의 첫 액션 빈도·EV·에퀴티를 보드 텍스처별로 집계합니다."],
@@ -139,7 +139,7 @@ function LibraryStatus() {
         <tbody>
           <tr>
             <td>프리플랍</td>
-            <td>토너먼트 8맥스 앤티 15·25·40·60bb (전체 트리) · 캐시 6맥스 100bb (보조)</td>
+            <td>토너먼트 8맥스 앤티 6·10·15·25·40·60bb (전체 트리) · 캐시 6맥스 100bb (보조)</td>
           </tr>
           {MATCHUPS.map((m, i) => (
             <tr key={m.id} className="clickable" onClick={() => (window.location.hash = `/reports?m=${m.id}`)}>

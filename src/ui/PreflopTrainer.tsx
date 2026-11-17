@@ -97,6 +97,7 @@ export function PreflopTrainer() {
   }
   useEffect(() => {
     if (spots.length) next();
+    else setDeal(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spots]);
 
@@ -184,6 +185,7 @@ export function PreflopTrainer() {
           </button>
           <span className="muted small">{spots.length}개 상황</span>
         </div>
+        {spots.length === 0 && <div className="card muted">이 스택·자리에는 고른 상황이 없습니다.{sc === "vs3bet" && " 짧은 스택에서는 오픈이 곧 올인이라 3벳에 대응할 일이 없습니다."}</div>}
         {deal && n && (
           <div className="card col">
             <div className="row">

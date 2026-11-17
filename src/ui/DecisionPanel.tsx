@@ -147,7 +147,7 @@ export function DecisionPanel(props: {
         <h3>
           {focusCls !== null ? classLabel(focusCls) : "핸드 상세"} {focusCls !== null && <span className="muted">({CLASS_COMBOS[focusCls].length}콤보 중 {focusCombos.length}개 레인지 내)</span>}
         </h3>
-        {focusCls === null && <div className="muted">그리드의 핸드에 마우스를 올리거나 클릭하세요.</div>}
+        {focusCls === null && <div className="muted">그리드의 핸드를 누르거나 마우스를 올리세요.</div>}
         {focusCls !== null && focusCombos.length > 0 && (
           <div className="combo-table">
             <table className="tbl">
