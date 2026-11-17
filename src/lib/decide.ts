@@ -1,7 +1,8 @@
 // 행동 결정 모델: 지금 상황(자리·카드·액션·보드)을 주면 내 차례의 액션별 빈도·EV와 추천 액션을 돌려준다.
 // 프리플랍은 미리 푼 8맥스 라이브러리 조회. 포스트플랍은 그 자리에서 푼다 — 리버는 끝까지(PostflopSolver),
 // 플랍·턴은 지금 스트리트만(StreetSolver). 시간 예산 안에서 멈추므로 3초 안에 답한다.
-import { COMBO_CLASS, NUM_CLASSES, comboIndex, parseCards } from "../engine/cards";
+import { CLASS_COMBOS, COMBO_CARDS, COMBO_CLASS, NUM_CLASSES, NUM_COMBOS, comboIndex, mulberry32, parseCards, shuffledDeck } from "../engine/cards";
+import { evaluate } from "../engine/evaluator";
 import { postflopOrder } from "../engine/ring";
 import { PostflopSolver, type HandSet } from "../engine/solver";
 import { StreetSolver } from "../engine/street";
@@ -57,8 +58,11 @@ export interface Decision {
   options: Option[];
   /** 추천 액션 (options 의 번호). rng 를 주면 빈도대로 뽑고, 없으면 빈도가 가장 높은 것 */
   pick: number;
-  /** library = 미리 푼 표 조회, exploit = 상대 성향을 넣어 다시 계산한 프리플랍, street-solve = 그 자리에서 한 스트리트 솔브 */
-  source: "library" | "exploit" | "street-solve";
+  /**
+   * library = 미리 푼 표 조회, exploit = 상대 성향을 넣어 다시 계산한 프리플랍, street-solve = 그 자리에서 한 스트리트 솔브,
+   * allin-equity = 표에 없는 프리플랍 흐름(림프·올인 위 레이즈 등)에서 상대 레인지 대 승률과 메인팟으로 콜·폴드만 계산한 것
+   */
+  source: "library" | "exploit" | "street-solve" | "allin-equity";
   format: string;
   iterations?: number;
   exploitabilityPct?: number;
@@ -157,6 +161,93 @@ function mapAction(node: DecisionNode, type: Act["type"], amount: number, allin:
   return best;
 }
 
+/** 표가 레인지를 좁혀 주지 못한 상대(표에 없는 액션)에게 두는 기본 레인지: 무작위 핸드 상대 승률 상위 이 비율 */
+const DEFAULT_TOP = 0.2;
+const EQUITY_SAMPLES = 2000;
+
+/** 내 핸드 대 상대 여러 명(자리별 169 레인지, 콤보 수 단위 가중치)의 승률. 몬테카를로, 비김은 나눈다 */
+export function multiwayEquity(hero: number[], ranges: Float64Array[], samples = EQUITY_SAMPLES, rng: () => number = mulberry32(7)): number {
+  const cdfs = ranges.map((w) => {
+    const cdf = new Float64Array(NUM_CLASSES);
+    let s = 0;
+    for (let c = 0; c < NUM_CLASSES; c++) cdf[c] = s += w[c];
+    return cdf;
+  });
+  const pick = (cdf: Float64Array): number => {
+    const x = rng() * cdf[NUM_CLASSES - 1];
+    let lo = 0;
+    let hi = NUM_CLASSES - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cdf[mid] < x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const seven = new Int32Array(7);
+  let won = 0;
+  let done = 0;
+  for (let s = 0; s < samples; s++) {
+    const used = new Set(hero);
+    const opps: Array<[number, number]> = [];
+    for (const cdf of cdfs) {
+      let got: [number, number] | null = null;
+      for (let t = 0; t < 30 && !got; t++) {
+        const combos = CLASS_COMBOS[pick(cdf)];
+        const [a, b] = COMBO_CARDS[combos[Math.floor(rng() * combos.length)]];
+        if (!used.has(a) && !used.has(b)) got = [a, b];
+      }
+      if (!got) break; // 카드가 겹쳐 뽑지 못한 표본은 버린다
+      used.add(got[0]).add(got[1]);
+      opps.push(got);
+    }
+    if (opps.length !== cdfs.length) continue;
+    const board = shuffledDeck(used, rng);
+    const score = (a: number, b: number) => {
+      seven[0] = a;
+      seven[1] = b;
+      for (let i = 0; i < 5; i++) seven[2 + i] = board[i];
+      return evaluate(seven, 7);
+    };
+    const mine = score(hero[0], hero[1]);
+    let ties = 1;
+    let beaten = false;
+    for (const [a, b] of opps) {
+      const v = score(a, b);
+      if (v > mine) {
+        beaten = true;
+        break;
+      }
+      if (v === mine) ties++;
+    }
+    if (!beaten) won += 1 / ties;
+    done++;
+  }
+  return done ? won / done : 0;
+}
+
+/** 무작위 핸드 상대 평균 승률(eq169) 상위 DEFAULT_TOP 비율의 클래스. 행렬이 없으면 모든 핸드 */
+function strongDefault(eq: Float32Array | Float64Array | null): Float64Array {
+  const out = new Float64Array(NUM_CLASSES);
+  if (!eq) {
+    out.set(CLASS_N);
+    return out;
+  }
+  const avg = Array.from({ length: NUM_CLASSES }, (_, i) => {
+    let s = 0;
+    for (let j = 0; j < NUM_CLASSES; j++) s += eq[i * NUM_CLASSES + j] * CLASS_N[j];
+    return s / NUM_COMBOS;
+  });
+  const order = avg.map((_, c) => c).sort((a, b) => avg[b] - avg[a]);
+  let mass = 0;
+  for (const c of order) {
+    if (mass >= NUM_COMBOS * DEFAULT_TOP) break;
+    out[c] = CLASS_N[c];
+    mass += CLASS_N[c];
+  }
+  return out;
+}
+
 export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision> {
   const t0 = Date.now();
   const deadline = t0 + (opts.budgetMs ?? 2500);
@@ -179,6 +270,9 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
   if (first < 0) throw new Error(`${format} 은 ${N}명까지입니다`);
   const hero = P.indexOf(spot.hero);
   if (hero < first) throw new Error(`내 자리는 ${P.slice(first).join(", ")} 중 하나여야 합니다`);
+  for (const a of [...spot.preflop, ...(spot.flop ?? []), ...(spot.turn ?? []), ...(spot.river ?? [])]) {
+    if (!P.includes(a.pos)) throw new Error(`액션의 자리 이름이 잘못됐습니다: ${JSON.stringify(a.pos)} (${P.slice(first).join(", ")} 중 하나)`);
+  }
   if (spot.stack < cfg.stack * 0.6 || spot.stack > cfg.stack * 1.5) note(`스택 ${spot.stack}bb 를 가장 가까운 ${cfg.stack}bb 표로 계산했습니다`);
   if (spot.players === 2) note("헤즈업 프리플랍은 8맥스 SB 대 BB 표로 근사했습니다");
 
@@ -196,15 +290,20 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
   const reach = P.map(() => Float64Array.from(CLASS_N));
   let node: PfLibNode | null = lib.nodes[0];
   let end = "";
+  const folded = new Set(spot.preflop.filter((a) => a.type === "fold").map((a) => P.indexOf(a.pos)));
   for (let guard = 0; node && guard < 80; guard++) {
     const nd: PfLibNode = node;
     const i = nd.p;
     const pass = () => Math.max(nd.a.findIndex((x) => x[0] === "fold"), nd.a.findIndex((x) => x[0] === "check"));
+    const callIdx = () => Math.max(nd.a.findIndex((x) => x[0] === "call"), nd.a.findIndex((x) => x[0] === "check"));
     let ai: number;
     const k = acts.findIndex((a) => a.pos === P[i]);
     if (i < first) ai = pass();
-    else if (k < 0) {
-      if (i !== hero) throw new Error(`${P[i]} 의 프리플랍 액션이 빠졌습니다`);
+    else if (k < 0 && i !== hero) {
+      // 앉아 있지만 기록에 액션이 없는 자리(자리 비움·관측 누락)는 폴드로 본다. 예전에는 여기서 멈춰 답을 못 냈다
+      note(`${P[i]} 의 프리플랍 액션이 기록에 없어 폴드로 봤습니다`);
+      ai = pass();
+    } else if (k < 0) {
       if (reach[hero][cls] / CLASS_N[cls] < 0.01) note("이 핸드는 GTO 라인이라면 여기까지 오지 않습니다");
       // 표의 스택과 내 스택이 다를 수 있으니 올인·콜 금액은 실제 스택과 실제로 걸린 돈으로 보여 준다
       const options = nd.a.map((x, a) => {
@@ -230,10 +329,13 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
         inv[i] = Math.min(to, spot.stack);
       }
       ai = mapPreflopAction(nd, { player: a.pos, type: a.type, amount: 0, to: inv[i], allin: !!a.allin }, spot.stack);
-      if (ai < 0) {
-        if (a.type !== "call") throw new Error(`${a.pos} ${a.type} 는 프리플랍 트리에 없는 액션입니다`);
+      if (ai < 0 && a.type !== "call" && callIdx() >= 0) {
+        // 올인 위에 더 큰 올인처럼 표에 레이즈가 없는 자리의 레이즈는 콜로 본다 (넣은 돈은 inv 에 그대로 반영)
+        note(`${a.pos} ${a.type} 는 표에 없는 액션(올인 위 레이즈 등)이라 콜로 보고 계산했습니다`);
+        ai = callIdx();
+      } else if (ai < 0) {
         // 림프·콜드콜처럼 GTO 트리에 없는 콜은 죽은 돈으로만 본다
-        note(`${a.pos} 콜은 GTO 트리에 없어 폴드한 것으로 두고 계산했습니다(넣은 돈은 팟에 반영)`);
+        note(`${a.pos} ${a.type === "call" ? "콜" : a.type}은 GTO 트리에 없어 폴드한 것으로 두고 계산했습니다(넣은 돈은 팟에 반영)`);
         ai = pass();
       }
     }
@@ -248,6 +350,44 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
       end = child;
       node = null;
     } else node = lib.nodes[child];
+  }
+  // ---- 표 밖 프리플랍 흐름: 트리는 내 차례에 닿지 못했지만(림프 팟, 내 림프 뒤 올인, 레이즈 횟수 초과 등) 실제로는 내가 행동해야 한다 ----
+  // 예전에는 여기서 예외를 던져 호출하는 쪽이 제멋대로 판단했다. 이제 상대 레인지 대 내 승률과 "내가 이길 수 있는 메인팟"으로 콜·폴드를 답한다
+  if (!spot.board) {
+    // 트리가 먼저 끝나 따라가지 못한 액션(림프 뒤의 레이즈 등)도 돈은 넣은 것이다. 그 자리의 레인지는 표로 좁힐 수 없다
+    const unmatched = new Set<number>();
+    for (const a of acts) {
+      const i = P.indexOf(a.pos);
+      if (i < first || a.type === "fold" || a.type === "check") continue;
+      inv[i] = Math.min(spot.stack, a.type === "call" ? Math.max(...inv) : a.allin && a.to === undefined ? spot.stack : (a.to ?? inv[i]));
+      unmatched.add(i);
+    }
+    const total = Math.min(spot.stack, Math.max(...inv));
+    const toCall = r2(total - inv[hero]);
+    if (toCall <= 0.01) {
+      note("림프 팟처럼 표에 없는 흐름이라 체크로 둡니다. 레이즈가 나은지는 표로 판단할 수 없습니다");
+      return { street: "preflop", options: [{ type: "check", label: "체크", amount: inv[hero], freq: 1, ev: 0 }], pick: 0, source: "allin-equity", format, ms: Date.now() - t0, notes };
+    }
+    const live = P.map((_, i) => i).filter((i) => i >= first && i !== hero && !folded.has(i));
+    const eq = opts.eq ? await opts.eq() : null;
+    const ranges = live.map((i) => {
+      let mass = 0;
+      for (let c = 0; c < NUM_CLASSES; c++) mass += reach[i][c];
+      if (!unmatched.has(i) && mass / NUM_COMBOS >= 0.005) return reach[i];
+      note(`${P[i]} 의 레인지는 표로 좁히지 못해 무작위 핸드 상대 승률 상위 ${Math.round(DEFAULT_TOP * 100)}% 핸드로 봤습니다`);
+      return strongDefault(eq);
+    });
+    const equity = multiwayEquity(hc, ranges);
+    // 사이드팟: 각자 넣은 돈 중 내 총 투자(total)까지만 내가 이길 수 있다
+    const mainPot = r2(P.reduce((s, _, i) => s + (i === hero ? total : i >= first ? Math.min(inv[i], total) : 0), 0) + cfg.ante * spot.players);
+    const ev = r2(equity * mainPot - toCall);
+    const call = ev > 0;
+    const options: Option[] = [
+      { type: "fold", label: "폴드", amount: 0, freq: call ? 0 : 1, ev: 0 },
+      { type: "call", label: `콜 ${toCall}`, amount: total, freq: call ? 1 : 0, ev }
+    ];
+    note(`표에 없는 흐름이라 상대 ${live.length}명의 레인지 대 내 승률 ${Math.round(equity * 100)}% 와 메인팟 ${mainPot}bb 로 콜·폴드만 계산했습니다 (레이즈는 판단하지 않음)`);
+    return { street: "preflop", options, pick: call ? 1 : 0, source: "allin-equity", format, ms: Date.now() - t0, notes };
   }
   const term = lib.terminals[Number(end.slice(1))];
   if (!term || term.type !== "flop") throw new Error("프리플랍에서 핸드가 끝났습니다 (결정할 것이 없습니다)");

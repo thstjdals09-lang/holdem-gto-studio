@@ -6,8 +6,8 @@ import { parseRange } from "../src/engine/range";
 import { PostflopSolver } from "../src/engine/solver";
 import { StreetSolver } from "../src/engine/street";
 import { buildTree, type TreeConfig } from "../src/engine/tree";
-import { decide, type Spot } from "../src/lib/decide";
-import type { PfLib } from "../src/lib/preflopLib";
+import { decide, multiwayEquity, type Spot } from "../src/lib/decide";
+import { CLASS_N, type PfLib } from "../src/lib/preflopLib";
 
 const one = { bet: [66], raise: [] as number[] };
 const oop = parseRange("AA,KK,QQ,JJ,TT,99,88,77,66,55,44,33,22,AK,AQ,AJ,KQ,T9s,98s,87s,76s,65s");
@@ -77,13 +77,70 @@ describe.skipIf(!lib)("decide — 프리플랍", () => {
     expect(bb.options.reduce((s, o) => s + o.freq, 0)).toBeCloseTo(1, 2);
   });
 
-  it("앞사람 액션이 빠지면 알려 준다", async () => {
-    await expect(decide({ players: 6, hero: "BB", cards: "Ts9s", stack: 40, preflop: [] }, { preflop })).rejects.toThrow("LJ");
+  it("앞사람 액션이 빠지면 폴드로 보고 답하며 알려 준다", async () => {
+    const d = await decide({ players: 6, hero: "BB", cards: "Ts9s", stack: 40, preflop: [] }, { preflop });
+    expect(d.notes.join(" ")).toContain("LJ 의 프리플랍 액션이 기록에 없어");
+    expect(d.options[d.pick].type).toBe("check"); // 모두 폴드한 것으로 보면 BB 는 할 일이 없다
   });
 });
 
 const has = (id: string) => existsSync(`public/lib/preflop/${id}.json`);
 const byId = async (id: string) => JSON.parse(readFileSync(`public/lib/preflop/${id}.json`, "utf-8")) as PfLib;
+const eqFile = "public/lib/eq169.bin";
+const eq = async () => {
+  const b = readFileSync(eqFile);
+  return new Float32Array(b.buffer, b.byteOffset, b.length / 4);
+};
+
+describe.skipIf(!lib || !has("mtt8-10") || !existsSync(eqFile))("decide — 표 밖 프리플랍 흐름 (림프·올인 위 레이즈·사이드팟)", () => {
+  // 2026-11-17 실전 로그에서 엔진이 예외를 던져 호출자가 제멋대로 콜한 자리들
+  it("림프 팟의 BB 는 예외 대신 체크를 답한다", async () => {
+    const limps = [{ pos: "UTG", type: "fold" as const }, { pos: "UTG1", type: "call" as const }, ...folds("LJ", "HJ", "CO"), { pos: "BTN", type: "call" as const }, ...folds("SB")];
+    const d = await decide({ players: 8, hero: "BB", cards: "As8s", stack: 40, preflop: limps }, { preflop, eq });
+    expect(d.source).toBe("allin-equity");
+    expect(d.options[d.pick].type).toBe("check");
+    expect(d.notes.join(" ")).toContain("림프");
+  });
+
+  it("올인 위의 더 큰 올인은 콜로 보고 표로 답한다: 72o 폴드, AA 콜", async () => {
+    const pre = [{ pos: "UTG", type: "raise" as const, allin: true }, ...folds("UTG1", "LJ", "HJ"), { pos: "CO", type: "raise" as const, to: 25, allin: true }, ...folds("BTN", "SB")];
+    const junk = await decide({ players: 8, hero: "BB", cards: "7s2h", stack: 10, preflop: pre }, { preflop: byId, eq });
+    expect(junk.source).toBe("library");
+    expect(junk.notes.join(" ")).toContain("CO raise 는 표에 없는 액션");
+    expect(junk.options[junk.pick].type).toBe("fold");
+    const aces = await decide({ players: 8, hero: "BB", cards: "AsAh", stack: 10, preflop: pre }, { preflop: byId, eq });
+    expect(aces.options[aces.pick].type).toBe("call");
+  });
+
+  it("내가 림프한 뒤 올인을 받으면 레인지 대 승률과 메인팟으로 콜·폴드를 답한다", async () => {
+    const pre = [...folds("UTG", "UTG1", "LJ"), { pos: "HJ", type: "call" as const }, { pos: "CO", type: "raise" as const, to: 30.67, allin: true }, ...folds("BTN", "SB", "BB")];
+    const qq = await decide({ players: 8, hero: "HJ", cards: "QdQs", stack: 36, preflop: pre }, { preflop, eq });
+    expect(qq.source).toBe("allin-equity");
+    const call = qq.options.find((o) => o.type === "call")!;
+    expect(call.amount).toBeCloseTo(30.67, 2);
+    expect(call.label).toBe("콜 29.67");
+    expect(call.ev).toBeGreaterThan(5);
+    expect(qq.options[qq.pick].type).toBe("call");
+    const junk = await decide({ players: 8, hero: "HJ", cards: "7s2h", stack: 36, preflop: pre }, { preflop, eq });
+    expect(junk.options[junk.pick].type).toBe("fold");
+    expect(junk.options.find((o) => o.type === "call")!.ev).toBeLessThan(0);
+  });
+
+  it("사이드팟: 짧은 내가 두 올인을 받을 때 이길 수 있는 돈은 내 스택 몫까지만", async () => {
+    // 7bb BB. UTG 30bb 올인, CO 가 60bb 로 다시 올인(표에 없는 레이즈 → 콜로 봄). 메인팟 = 7×3 + 블라인드·앤티 몫
+    const pre = [{ pos: "UTG", type: "raise" as const, to: 30, allin: true }, ...folds("UTG1", "LJ", "HJ"), { pos: "CO", type: "raise" as const, to: 60, allin: true }, ...folds("BTN", "SB")];
+    const d = await decide({ players: 8, hero: "BB", cards: "7h3c", stack: 7, preflop: pre }, { preflop: byId, eq });
+    const call = d.options.find((o) => o.type === "call")!;
+    expect(call.amount).toBe(7);
+    expect(d.options[d.pick].type).toBe("fold");
+  });
+
+  it("다자 승률: AA 는 두 명의 무작위 핸드를 60% 넘게 이기고, 72o 는 25% 아래", () => {
+    const any = () => Float64Array.from(CLASS_N);
+    expect(multiwayEquity(parseCards("AsAh"), [any(), any()], 1500)).toBeGreaterThan(0.6);
+    expect(multiwayEquity(parseCards("7s2h"), [any(), any()], 1500)).toBeLessThan(0.25);
+  });
+});
 
 describe.skipIf(!has("mtt8-6") || !has("mtt8-10"))("decide — 짧은 스택 (15bb 미만)", () => {
   const toBtn = folds("UTG", "UTG1", "LJ", "HJ", "CO");
