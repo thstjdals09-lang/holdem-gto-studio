@@ -45,10 +45,101 @@ export function buildHandSet(board: number[], w0: RangeWeights, w1: RangeWeights
   };
 }
 
-interface BoardEval {
+export interface BoardEval {
   strength: Int32Array; // 슬롯별 강도 (-1 = 보드와 충돌)
   order: Int32Array; // 살아있는 슬롯을 강도 오름차순 정렬
   bounds: Int32Array; // 같은 강도 그룹의 시작 위치들 + 끝(m)
+}
+
+/** 5장 보드에서 슬롯별 강도와 강도 오름차순 정렬. sortBuf 는 길이 n 이상의 작업 버퍼 */
+export function boardEval(board: number[], hands: HandSet, sortBuf: Int32Array = new Int32Array(hands.n)): BoardEval {
+  const n = hands.n;
+  const strength = new Int32Array(n);
+  const dead = new Set(board);
+  const cards = new Array<number>(7);
+  for (let i = 0; i < 5; i++) cards[i] = board[i];
+  let live = 0;
+  for (let s = 0; s < n; s++) {
+    const a = hands.a[s];
+    const b = hands.b[s];
+    if (dead.has(a) || dead.has(b)) {
+      strength[s] = -1;
+      continue;
+    }
+    cards[5] = a;
+    cards[6] = b;
+    strength[s] = evaluate(cards, 7);
+    sortBuf[live++] = s;
+  }
+  const order = sortBuf.slice(0, live);
+  order.sort((x, y) => strength[x] - strength[y]);
+  const b: number[] = [];
+  for (let i = 0; i < live; i++) if (i === 0 || strength[order[i]] !== strength[order[i - 1]]) b.push(i);
+  b.push(live);
+  return { strength, order, bounds: Int32Array.from(b) };
+}
+
+/** 상대 reach 합(반환)과 카드별 reach 합(tc, 길이 52) */
+export function cardTotals(hands: HandSet, ro: Float32Array, tc: Float64Array): number {
+  tc.fill(0);
+  let total = 0;
+  const n = hands.n;
+  for (let h = 0; h < n; h++) {
+    const v = ro[h];
+    if (v === 0) continue;
+    total += v;
+    tc[hands.a[h]] += v;
+    tc[hands.b[h]] += v;
+  }
+  return total;
+}
+
+/**
+ * 쇼다운 스윕: out[h] = potPrime*(약한 상대 reach + 0.5*동점) - I*S_h (S_h = 카드가 겹치지 않는 상대 reach 합).
+ * tc·cum·gc 는 길이 52 작업 버퍼. gc 는 0 으로 넘겨야 하고 0 으로 돌려 놓는다
+ */
+export function showdownSweep(e: BoardEval, hands: HandSet, ro: Float32Array, potPrime: number, I: number, out: Float32Array, tc: Float64Array, cum: Float64Array, gc: Float64Array): void {
+  const { order, bounds } = e;
+  const total = cardTotals(hands, ro, tc);
+  cum.fill(0);
+  let cumAll = 0;
+  const ha = hands.a;
+  const hb = hands.b;
+  out.fill(0);
+  const G = bounds.length - 1;
+  for (let g = 0; g < G; g++) {
+    const i = bounds[g];
+    const j = bounds[g + 1];
+    let groupSum = 0;
+    for (let k = i; k < j; k++) {
+      const h = order[k];
+      const v = ro[h];
+      groupSum += v;
+      gc[ha[h]] += v;
+      gc[hb[h]] += v;
+    }
+    for (let k = i; k < j; k++) {
+      const h = order[k];
+      const a = ha[h];
+      const b = hb[h];
+      const rv = ro[h];
+      const weaker = cumAll - cum[a] - cum[b];
+      const tie = groupSum - gc[a] - gc[b] + rv;
+      const S = total - tc[a] - tc[b] + rv;
+      out[h] = potPrime * (weaker + 0.5 * tie) - I * S;
+    }
+    for (let k = i; k < j; k++) {
+      const h = order[k];
+      const v = ro[h];
+      const a = ha[h];
+      const b = hb[h];
+      cumAll += v;
+      cum[a] += v;
+      cum[b] += v;
+      gc[a] = 0;
+      gc[b] = 0;
+    }
+  }
 }
 
 export type PathStep = { kind: "action"; index: number } | { kind: "card"; card: number };
@@ -227,48 +318,14 @@ export class PostflopSolver {
     const key = this.evalKey(board);
     let e = this.evalCache[key];
     if (e) return e;
-    const n = this.hands.n;
-    const strength = new Int32Array(n);
-    const dead = new Set(board);
-    const cards = new Array<number>(7);
-    for (let i = 0; i < 5; i++) cards[i] = board[i];
-    let live = 0;
-    for (let s = 0; s < n; s++) {
-      const a = this.hands.a[s];
-      const b = this.hands.b[s];
-      if (dead.has(a) || dead.has(b)) {
-        strength[s] = -1;
-        continue;
-      }
-      cards[5] = a;
-      cards[6] = b;
-      strength[s] = evaluate(cards, 7);
-      this.sortBuf[live++] = s;
-    }
-    const order = this.sortBuf.slice(0, live);
-    order.sort((x, y) => strength[x] - strength[y]);
-    const b: number[] = [];
-    for (let i = 0; i < live; i++) if (i === 0 || strength[order[i]] !== strength[order[i - 1]]) b.push(i);
-    b.push(live);
-    e = { strength, order, bounds: Int32Array.from(b) };
+    e = boardEval(board, this.hands, this.sortBuf);
     this.evalCache[key] = e;
     return e;
   }
 
   // ---------- 터미널 ----------
   private computeTotals(ro: Float32Array): number {
-    const tc = this.totalCard;
-    tc.fill(0);
-    let total = 0;
-    const n = this.hands.n;
-    for (let h = 0; h < n; h++) {
-      const v = ro[h];
-      if (v === 0) continue;
-      total += v;
-      tc[this.hands.a[h]] += v;
-      tc[this.hands.b[h]] += v;
-    }
-    return total;
+    return cardTotals(this.hands, ro, this.totalCard);
   }
   /** S[h] = 충돌 없는 상대 reach 합 */
   private fillS(ro: Float32Array, out: Float32Array): void {
@@ -298,50 +355,7 @@ export class PostflopSolver {
 
   /** 쇼다운: out[h] = potPrime*(약한 상대 reach + 0.5*동점) - I*S_h */
   private showdownCFV(board: number[], ro: Float32Array, potPrime: number, I: number, out: Float32Array): void {
-    const { order, bounds } = this.evalBoard(board);
-    const total = this.computeTotals(ro);
-    const tc = this.totalCard;
-    const cum = this.cumCard;
-    const gc = this.groupCard; // 항상 0으로 유지 (그룹 처리 후 건드린 칸만 되돌림)
-    cum.fill(0);
-    let cumAll = 0;
-    const ha = this.hands.a;
-    const hb = this.hands.b;
-    out.fill(0);
-    const G = bounds.length - 1;
-    for (let g = 0; g < G; g++) {
-      const i = bounds[g];
-      const j = bounds[g + 1];
-      let groupSum = 0;
-      for (let k = i; k < j; k++) {
-        const h = order[k];
-        const v = ro[h];
-        groupSum += v;
-        gc[ha[h]] += v;
-        gc[hb[h]] += v;
-      }
-      for (let k = i; k < j; k++) {
-        const h = order[k];
-        const a = ha[h];
-        const b = hb[h];
-        const rv = ro[h];
-        const weaker = cumAll - cum[a] - cum[b];
-        const tie = groupSum - gc[a] - gc[b] + rv;
-        const S = total - tc[a] - tc[b] + rv;
-        out[h] = potPrime * (weaker + 0.5 * tie) - I * S;
-      }
-      for (let k = i; k < j; k++) {
-        const h = order[k];
-        const v = ro[h];
-        const a = ha[h];
-        const b = hb[h];
-        cumAll += v;
-        cum[a] += v;
-        cum[b] += v;
-        gc[a] = 0;
-        gc[b] = 0;
-      }
-    }
+    showdownSweep(this.evalBoard(board), this.hands, ro, potPrime, I, out, this.totalCard, this.cumCard, this.groupCard);
   }
 
   // ---------- 런아웃 오프셋 ----------

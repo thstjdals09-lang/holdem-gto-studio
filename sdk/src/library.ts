@@ -152,7 +152,8 @@ export class GtoLibrary {
 
   /**
    * 행동 결정: 지금 상황에서 내 차례의 액션별 빈도·EV와 추천 액션 (2~8명, 기본 2.5초 안).
-   * 프리플랍은 라이브러리 조회, 리버는 끝까지 풀고, 플랍·턴은 한 스트리트 근사다 (Decision.notes 에 표시).
+   * 프리플랍은 라이브러리 조회, 리버는 끝까지 풀고, 플랍·턴은 깊이 제한 풀이다 (Decision.notes 에 표시).
+   * opts.ports 에 nodeSubPorts()·browserSubPorts() 를 주면 플랍·턴 런아웃 계산을 여러 코어로 나눈다 (플랍 깊이 제한은 ports 가 있을 때만).
    */
   decide(spot: Spot, opts: Omit<DecideOptions, "preflop"> = {}): Promise<Decision> {
     // 상대 성향(spot.reads)을 쓸 때만 받는다 (한 번 받으면 재사용)

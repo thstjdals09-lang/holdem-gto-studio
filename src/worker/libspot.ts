@@ -43,7 +43,7 @@ interface NodeData {
   ev: Float32Array; // A*n
 }
 
-function decode(buf: ArrayBuffer, nodes: DecisionNode[], n: number): Map<number, NodeData> {
+export function decode(buf: ArrayBuffer, nodes: DecisionNode[], n: number): Map<number, NodeData> {
   const dv = new DataView(buf);
   const out = new Map<number, NodeData>();
   let p = 0;

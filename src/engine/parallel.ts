@@ -5,6 +5,7 @@
 import { buildTree, type GameTree, type TreeConfig, type TreeNode, type Action } from "./tree";
 import { PostflopSolver, type PathStep, type SolverMetrics } from "./solver";
 import type { RangeWeights } from "./range";
+import { LookaheadSolver, type LeafMode, type LeafRequest, type LeafSums, type LookaheadOptions } from "./lookahead";
 
 export type ChanceMode = "train" | "avg" | "br";
 export interface ChanceItem {
@@ -26,7 +27,9 @@ export type SubRequest =
   | { op: "lock"; ch: number; card: number; rest: PathStep[]; strategy: Float32Array | null; allRunouts: boolean; unlock: boolean }
   | { op: "clearLocks" }
   | { op: "export" }
-  | { op: "import"; data: Float32Array; iterations: number };
+  | { op: "import"; data: Float32Array; iterations: number }
+  | { op: "look-init"; id: number; config: TreeConfig; w0: Float32Array; w1: Float32Array; opts: LookaheadOptions }
+  | { op: "look-leaves"; id: number; p: 0 | 1; mode: LeafMode; t: number; items: LeafRequest[] };
 
 /** 노드 요약 (자식 트리는 빼고 주고받는다) */
 export interface NodeInfo {
@@ -81,8 +84,23 @@ function stripAnalysis(a: ReturnType<PostflopSolver["analyzeDecision"]>): NodeAn
   return { strategy: a.strategy, ev: a.ev, handEv: a.handEv, equity: a.equity, eqr: a.eqr, reachP: a.reachP, reachO: a.reachO, S: a.S, actionFreq: a.actionFreq, actionEv: a.actionEv, rangeEv: a.rangeEv, rangeEquity: a.rangeEquity };
 }
 
+/** 워커가 들고 있는 깊이 제한 솔버 수 (결정 모델의 캐시 8개보다 넉넉히) */
+const LOOK_KEEP = 16;
+type SubState = { solver: PostflopSolver | null; looks?: Map<number, LookaheadSolver> };
+
 /** 하위 솔버 쪽 요청 처리 (같은 스레드 포트와 워커가 공용) */
-export function handleSubRequest(state: { solver: PostflopSolver | null }, req: SubRequest): unknown {
+export function handleSubRequest(state: SubState, req: SubRequest): unknown {
+  if (req.op === "look-init") {
+    const looks = (state.looks ??= new Map());
+    looks.set(req.id, new LookaheadSolver(req.config, req.w0, req.w1, req.opts));
+    for (const k of looks.keys()) if (looks.size > LOOK_KEEP) looks.delete(k);
+    return true;
+  }
+  if (req.op === "look-leaves") {
+    const look = state.looks?.get(req.id);
+    if (!look) throw new Error("워커에 없는 깊이 제한 솔버입니다");
+    return req.items.map((it) => look.leafSums(it.ch, req.p, it.rP, it.rO, req.mode, req.t));
+  }
   if (req.op === "init") {
     const { config, w0, w1, cards } = req.init;
     state.solver = new PostflopSolver(buildTree(config), w0, w1, { firstCards: cards });
@@ -114,7 +132,7 @@ export function handleSubRequest(state: { solver: PostflopSolver | null }, req: 
 
 /** 같은 스레드에서 도는 하위 솔버 (테스트, 워커가 없는 환경) */
 export class LocalSubPort implements SubPort {
-  private state: { solver: PostflopSolver | null } = { solver: null };
+  private state: SubState = { solver: null };
   async call(req: SubRequest): Promise<unknown> {
     return handleSubRequest(this.state, req);
   }
@@ -159,7 +177,7 @@ export class MessageSubPort implements SubPort {
 
 /** 워커 스크립트 쪽: 메시지를 받아 처리하고 응답한다 */
 export function serveSubRequests(post: (msg: unknown) => void, listen: (handler: (msg: unknown) => void) => void): void {
-  const state: { solver: PostflopSolver | null } = { solver: null };
+  const state: SubState = { solver: null };
   listen((m) => {
     const { id, req } = m as { id: number; req: SubRequest };
     try {
@@ -438,4 +456,34 @@ export class ParallelPostflopSolver {
   close(): void {
     for (const pt of this.ports) pt.close();
   }
+}
+
+let lookSeq = 0;
+/**
+ * 깊이 제한 솔버의 런아웃 계산을 하위 솔버들에 나눠 맡긴다. 돌려주는 솔버는 stepAsync·metricsAsync·analyzeAsync 로 쓴다.
+ * 조정자는 지금 스트리트만 계산하고, 하위 솔버 k 는 런아웃 j % 개수 === k 와 대조 변량 승률 행렬의 k 번째 행 묶음을 맡는다
+ */
+export async function lookaheadOnPorts(ports: SubPort[], config: TreeConfig, w0: Float32Array, w1: Float32Array, opts: LookaheadOptions = {}): Promise<LookaheadSolver> {
+  if (!ports.length) throw new Error("하위 솔버가 없습니다");
+  const id = ++lookSeq;
+  const main = new LookaheadSolver(config, w0, w1, { ...opts, coordinator: true });
+  await Promise.all(ports.map((port, index) => port.call({ op: "look-init", id, config, w0, w1, opts: { ...opts, shard: { index, count: ports.length } } })));
+  main.hook = async (items, p, mode, t) => {
+    const parts = (await Promise.all(ports.map((port) => port.call({ op: "look-leaves", id, p, mode, t, items })))) as LeafSums[][];
+    return items.map((_, i) => {
+      const acc = parts[0][i].acc.slice();
+      const msum = parts[0][i].msum.slice();
+      const exact = parts[0][i].exact?.slice();
+      for (let k = 1; k < parts.length; k++) {
+        const x = parts[k][i];
+        for (let h = 0; h < acc.length; h++) {
+          acc[h] += x.acc[h];
+          msum[h] += x.msum[h];
+          if (exact && x.exact) exact[h] += x.exact[h];
+        }
+      }
+      return { acc, msum, exact };
+    });
+  };
+  return main;
 }

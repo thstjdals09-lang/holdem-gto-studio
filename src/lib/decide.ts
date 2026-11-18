@@ -1,10 +1,14 @@
 // 행동 결정 모델: 지금 상황(자리·카드·액션·보드)을 주면 내 차례의 액션별 빈도·EV와 추천 액션을 돌려준다.
 // 프리플랍은 미리 푼 8맥스 라이브러리 조회. 포스트플랍은 그 자리에서 푼다 — 리버는 끝까지(PostflopSolver),
-// 플랍·턴은 지금 스트리트만(StreetSolver). 시간 예산 안에서 멈추므로 3초 안에 답한다.
+// 플랍·턴은 깊이 제한(LookaheadSolver): 지금 스트리트를 풀고, 잎 뒤에 실제 카드를 딜해 한 라운드 더 베팅한 뒤 쇼다운까지.
+// 시간 예산 안에서 멈추므로 3초 안에 답한다.
 import { CLASS_COMBOS, COMBO_CARDS, COMBO_CLASS, NUM_CLASSES, NUM_COMBOS, comboIndex, mulberry32, parseCards, shuffledDeck } from "../engine/cards";
 import { evaluate } from "../engine/evaluator";
 import { postflopOrder } from "../engine/ring";
 import { PostflopSolver, type HandSet } from "../engine/solver";
+import { LookaheadSolver, type LookaheadOptions } from "../engine/lookahead";
+import { lookaheadOnPorts, type SubPort } from "../engine/parallel";
+import { MULTI_MAX, mapAction, multiStreet } from "./decideMulti";
 import { StreetSolver } from "../engine/street";
 import { buildTree, type DecisionNode, type GameTree, type TreeConfig, type TreeNode } from "../engine/tree";
 import { mapPreflopAction } from "./analyze";
@@ -76,19 +80,57 @@ export interface DecideOptions {
   preflop: (formatId: string) => Promise<PfLib>;
   /** 169×169 프리플랍 에퀴티 행렬(lib/eq169.bin). 상대 성향(reads)을 쓸 때만 필요 */
   eq?: () => Promise<Float32Array | Float64Array>;
-  /** 한 번의 결정에 쓸 시간 (ms, 기본 2500) */
+  /** 한 번의 결정에 쓸 시간 (ms, 기본 5000). LONG_BUDGET 이상이면 반복이 늘어난 만큼 무거운 설정(긴 예산용 표)을 쓴다 */
   budgetMs?: number;
   rng?: () => number;
+  /**
+   * 하위 솔버 통로(SDK 의 nodeSubPorts·browserSubPorts). 주면 플랍·턴 깊이 제한 풀이의 런아웃 계산을 나눠 맡겨
+   * 같은 시간에 반복을 코어 수만큼 더 돈다. 없으면 한 스레드로 돌고, 시간 안에 반복이 모자라면 한 스레드 근사로 바꾼다
+   */
+  ports?: SubPort[];
 }
 
 const DEPTHS = [6, 10, 15, 25, 40, 60];
-const MIN_ITER = 10;
+/** 최소 반복: 리버는 한 번이 싸고, 깊이 제한 플랍·턴은 한 번이 비싸서 시간 예산을 넘지 않게 적게 */
+const MIN_ITER = [2, 2, 10];
+/**
+ * 지금 스트리트는 깊이 제한(LookaheadSolver)으로 푼다. 단 플랍은 하위 솔버(ports)가 있을 때만:
+ * 결정 모델 트리(잎 11개)는 한 스레드로 2초에 10여 회밖에 못 돌고, 측정(bench-decide)상 플랍은 14회 1.15%·27회 0.80%
+ * (한 스트리트 근사 1.00%)라 그보다 적게 돌면 오히려 나쁘다. 지나온 스트리트를 다시 풀 때(레인지만 필요)는 시간이 짧아 한 스트리트 근사로 푼다.
+ * 이 반복 수보다 적게 돌았으면 notes 에 알린다
+ */
+const LOOK_NEED = [25, 10];
+/**
+ * 한 스트리트 근사(StreetSolver)의 승률 행렬 쌍 비교 한도. 기본 1.5억이면 결정 모델 플랍 트리에서 만드는 데만 1초가 들어
+ * 반복이 20회 남짓(익스플로잇 4%대)이었다. 지나온 스트리트는 레인지만 필요해 더 줄인다
+ */
+const PAIR_NOW = 5e7;
+const PAIR_REPLAY = 2e7;
 const MAX_ITER = 1000;
 /** 이보다 익스플로잇어빌리티(%)가 크면 못 믿을 답이라고 알린다. 한가한 PC 에서는 0.5% 아래로 끝난다 */
 const UNCONVERGED_PCT = 1;
 const STREETS = ["flop", "turn", "river"] as const;
 /** 지나온 스트리트를 처음 풀 때 쓰는 시간 (ms). 순서대로 물으면 기억해 둔 것을 쓰므로 들지 않는다 */
-const REPLAY_MS = [400, 400];
+/** 결정 한 번의 기본 시간과, 무거운 설정으로 바꾸는 기준 (ms) */
+export const DEFAULT_BUDGET = 5000;
+export const LONG_BUDGET = 4000;
+/** 지나온 스트리트를 처음 다시 풀 때 쓰는 시간: 예산 대비 비율 (2.5초면 600·500ms) */
+const REPLAY_FRAC = [0.24, 0.2];
+/**
+ * 플랍·턴 깊이 제한 설정 — scripts/bench-decide.ts 로 끝까지 푼 라이브러리와 비교해 고른 값 (2026-11-18, 노드당 팟 대비 EV 손실).
+ * 플랍: (턴, 리버) 12쌍을 딜하고 두 스트리트 베팅을 팟 크기 한 라운드로 합친다. 대조 변량으로 표본 운을 지운다
+ *   (한 스트리트 근사 1.00% → 1초 0.73%, 2초 0.63%. 런아웃을 늘리면 반복이 줄어 이 시간에는 12쌍이 낫다).
+ * 턴: 리버 8장을 딜하고 리버 라운드는 75% 한 크기, 대조 변량은 리버 48장 전부로 정확히 (0.83% → 0.5초 0.64%, 1.5초 0.18%. 16장은 0.83%·0.20%).
+ * 실제 리버가 오면 리버는 다시 끝까지 푼다
+ */
+export const FLOP_LOOK: LookaheadOptions = { runouts: 12, cv: 5e7 };
+export const TURN_LOOK: LookaheadOptions = { runouts: 8, cv: 1e8, future: { bet: [75], raise: [] } };
+/**
+ * 긴 예산(LONG_BUDGET 이상)용: 반복이 늘어 표본을 늘리는 쪽이 낫다 (5초 결정에 맞춘 벤치, 노드당 손실).
+ * 플랍 한 스레드 0.70% → 0.69%, 워커 0.68% → 0.64%. 턴 한 스레드 0.18% → 0.16%, 워커 0.15% → 0.10%
+ */
+export const FLOP_LOOK_LONG: LookaheadOptions = { runouts: 20, cv: 5e7 };
+export const TURN_LOOK_LONG: LookaheadOptions = { runouts: 16, cv: 1e8, future: { bet: [75], raise: [] } };
 /** 실제 액션이 풀이에서 레인지의 이 비율보다 적게 나오면 "GTO 라인에 거의 없는 액션"으로 본다 */
 const RARE = 0.05;
 /** 프리플랍에서 내 핸드가 이 노드에 올 비율이 이보다 작으면 표의 빈도 대신 EV 로 고른다 */
@@ -96,17 +138,52 @@ const OFF_LINE = 0.01;
 const r2 = (x: number) => Math.round(x * 100) / 100;
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 
-/** 플랍용 StreetSolver 와 턴·리버용 PostflopSolver 를 같은 모양으로 쓴다 */
+/** 플랍·턴용 LookaheadSolver 와 리버용 PostflopSolver 를 같은 모양으로 쓴다 */
 interface Sub {
   hands: HandSet;
   tree: GameTree;
   w: [Float32Array, Float32Array];
-  iterations: number;
-  step(k: number): void;
-  analyze(node: DecisionNode, reach: [Float32Array, Float32Array]): { strategy: Float32Array; ev: Float32Array };
-  metrics(): { exploitabilityPct: number };
-  sampled?: boolean;
+  readonly iterations: number;
+  step(k: number): void | Promise<void>;
+  /** 노드의 평균 전략 (레인지를 좁힐 때. EV 는 계산하지 않는다) */
+  strategy(node: DecisionNode): Float32Array;
+  analyze(node: DecisionNode, reach: [Float32Array, Float32Array]): { strategy: Float32Array; ev: Float32Array } | Promise<{ strategy: Float32Array; ev: Float32Array }>;
+  /** 수렴 지표. 깊이 제한 풀이는 재는 데 반복 몇 번만큼 들어서 재지 않는다 */
+  metrics?(): { exploitabilityPct: number };
+  /** 어떤 풀이인지 (notes 용) */
+  kind: "look" | "street" | "full";
   runouts?: number;
+}
+function lookSub(s: LookaheadSolver): Sub {
+  return {
+    hands: s.hands,
+    tree: s.tree,
+    w: s.w,
+    get iterations() {
+      return s.iterations;
+    },
+    step: (k) => s.stepAsync(k),
+    strategy: (d) => s.average(d),
+    analyze: (d, r) => s.analyzeAsync(d, r),
+    kind: "look",
+    runouts: s.runouts
+  };
+}
+function streetSub(tree: GameTree, w0: Float32Array, w1: Float32Array, budget: number): Sub {
+  const s = new StreetSolver(tree, w0, w1, 1, budget);
+  return {
+    hands: s.hands,
+    tree,
+    w: s.w,
+    get iterations() {
+      return s.iterations;
+    },
+    step: (k) => s.step(k),
+    strategy: (d) => s.average(d),
+    analyze: (d, r) => s.analyze(d, r),
+    metrics: () => s.metrics(),
+    kind: "street"
+  };
 }
 function fullSolver(tree: GameTree, w0: Float32Array, w1: Float32Array): Sub {
   const s = new PostflopSolver(tree, w0, w1);
@@ -119,8 +196,10 @@ function fullSolver(tree: GameTree, w0: Float32Array, w1: Float32Array): Sub {
       return s.iterationCount;
     },
     step: (k) => s.step(k),
+    strategy: (node) => s.avgStrategy(node, ctx),
     analyze: (node, reach) => s.analyzeDecision(node, ctx, reach),
-    metrics: () => s.metrics()
+    metrics: () => s.metrics(),
+    kind: "full"
   };
 }
 
@@ -146,23 +225,6 @@ function streetTree(board: number[], pot: number, left: number, extra: number, j
   const all = { flop: s, turn: s, river: s };
   // 실제로 올인이 나왔으면 올인 액션을 트리에 넣는다 (없으면 작은 벳으로 잘못 맞춰진다)
   return { board, pot, effStack: left, rakePct: 0, rakeCap: 0, oop: all, ip: all, allinThresholdPct: 67, maxRaisesPerStreet: 4, allowDonk: true, includeAllin: jam };
-}
-
-function mapAction(node: DecisionNode, type: Act["type"], amount: number, allin: boolean): number {
-  const find = (t: string) => node.actions.findIndex((x) => x.type === t);
-  if (type === "fold" || type === "check") return find(type);
-  if (type === "call") return find("call") >= 0 ? find("call") : find("check");
-  let best = -1;
-  let bd = Infinity;
-  node.actions.forEach((x, k) => {
-    if (x.type !== "bet" && x.type !== "raise" && x.type !== "allin") return;
-    const d = Math.abs(x.amount - amount) + (allin && x.type !== "allin" ? 1000 : 0);
-    if (d < bd) {
-      bd = d;
-      best = k;
-    }
-  });
-  return best;
 }
 
 /** 표가 레인지를 좁혀 주지 못한 상대(표에 없는 액션)에게 두는 기본 레인지: 무작위 핸드 상대 승률 상위 이 비율 */
@@ -256,7 +318,10 @@ function strongDefault(eq: Float32Array | Float64Array | null): Float64Array {
 
 export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision> {
   const t0 = Date.now();
-  const deadline = t0 + (opts.budgetMs ?? 2500);
+  const budget = opts.budgetMs ?? DEFAULT_BUDGET;
+  const deadline = t0 + budget;
+  const long = budget >= LONG_BUDGET;
+  const replayMs = (si: number) => budget * REPLAY_FRAC[si];
   const notes: string[] = [];
   const note = (s: string) => {
     if (!notes.includes(s)) notes.push(s);
@@ -465,31 +530,68 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
     if (left <= 0.01) throw new Error("이미 올인이라 결정할 것이 없습니다");
     const list = spot[name] ?? [];
     const current = board.length === nb;
-    const others = live.filter((i) => i !== hero);
-    // shortcut: 3명 이상이면 나와 "마지막에 벳·레이즈한 상대(없으면 가장 뒤에 행동하는 상대)" 둘의 승부로 줄여 푼다. 멀티웨이 정확도가 필요하면 MultiSolver 로 바꿀 것.
-    const aggr = [...list].reverse().find((a) => (a.type === "bet" || a.type === "raise") && others.includes(P.indexOf(a.pos)));
-    const vill = aggr ? P.indexOf(aggr.pos) : others[others.length - 1];
-    if (others.length > 1) note("3명 이상 팟은 나와 주 상대 한 명의 승부로 줄여 푼 근사입니다");
-    const pair = live.filter((i) => i === hero || i === vill);
-    const w = pair.map((i) => range.get(i)!);
-    w[pair.indexOf(hero)][combo] = Math.max(w[pair.indexOf(hero)][combo], 0.05); // 내 핸드가 GTO 레인지 밖이어도 답이 나오게
     const firstBet = list.find((a) => (a.type === "bet" || a.type === "raise") && a.to !== undefined);
     const extra = extraBet(firstBet ? Math.round((firstBet.to! / pot) * 100) : 0);
     const jam = list.some((a) => (a.type === "bet" || a.type === "raise") && (a.allin || (a.to ?? 0) >= left - 0.01));
     const sb = board.slice(0, nb);
-    const key = JSON.stringify([format, spot.reads, spot.players, spot.hero, combo, spot.stack, spot.preflop, sb, STREETS.slice(0, si).map((s) => spot[s]), vill, extra, jam]);
+    if (live.length >= 3 && live.length <= MULTI_MAX) {
+      // 3~4명: 남은 사람을 모두 넣어 풀고 모두의 레인지를 좁힌다 (decideMulti.ts)
+      const hw = range.get(hero)!;
+      hw[combo] = Math.max(hw[combo], 0.05); // 내 핸드가 GTO 레인지 밖이어도 답이 나오게
+      const res = multiStreet({
+        street: si as 0 | 1 | 2,
+        board: sb,
+        pot,
+        left,
+        names: live.map((i) => P[i]),
+        ranges: live.map((i) => range.get(i)!),
+        hero: live.indexOf(hero),
+        combo,
+        actions: list,
+        current,
+        until: current ? deadline - 250 : Math.min(deadline, Date.now() + replayMs(si)),
+        extra,
+        jam,
+        key: JSON.stringify(["multi", format, spot.reads, spot.players, spot.hero, combo, spot.stack, spot.preflop, sb, STREETS.slice(0, si).map((s) => spot[s]), extra, jam])
+      });
+      res.notes.forEach(note);
+      if (current) return { street: name, options: res.options!, pick: choose(res.options!, opts.rng), source: "street-solve", format, iterations: res.iterations, exploitabilityPct: res.exploitabilityPct, ms: Date.now() - t0, notes };
+      live.forEach((seat, k) => res.folded.includes(k) || range.set(seat, res.ranges[k]));
+      live = live.filter((_, k) => !res.folded.includes(k));
+      pot = res.pot;
+      left = res.left;
+      continue;
+    }
+    const others = live.filter((i) => i !== hero);
+    // shortcut: 5명 이상이면 나와 "마지막에 벳·레이즈한 상대(없으면 가장 뒤에 행동하는 상대)" 둘의 승부로 줄여 푼다
+    const aggr = [...list].reverse().find((a) => (a.type === "bet" || a.type === "raise") && others.includes(P.indexOf(a.pos)));
+    const vill = aggr ? P.indexOf(aggr.pos) : others[others.length - 1];
+    if (others.length > 1) note(`${MULTI_MAX + 1}명 이상 팟은 나와 주 상대 한 명의 승부로 줄여 푼 근사입니다`);
+    const pair = live.filter((i) => i === hero || i === vill);
+    const w = pair.map((i) => range.get(i)!);
+    w[pair.indexOf(hero)][combo] = Math.max(w[pair.indexOf(hero)][combo], 0.05); // 내 핸드가 GTO 레인지 밖이어도 답이 나오게
+    // 하위 솔버가 있느냐에 따라 플랍 풀이 방식이 달라서 키에 넣는다
+    const key = JSON.stringify([format, spot.reads, spot.players, spot.hero, combo, spot.stack, spot.preflop, sb, STREETS.slice(0, si).map((s) => spot[s]), vill, extra, jam, !!opts.ports?.length, long]);
+    // 플랍 깊이 제한은 하위 솔버가 있거나 예산이 길 때만 (한 스레드 2.5초는 반복이 모자라 오히려 나빴다)
+    const looks = si < 2 && current && (si === 1 || !!opts.ports?.length || long);
     let solver = cache.get(key);
+    // 다른 결정에서 지나온 스트리트로 근사해 둔 풀이는 지금 결정에 쓰지 않는다 (반대로 깊이 제한 풀이는 다시 풀 때 그대로 쓴다)
+    if (solver && looks && solver.kind === "street") solver = undefined;
     const fresh = !solver;
+    const limit = current ? deadline - 250 : Math.min(deadline, Date.now() + replayMs(si));
     if (!solver) {
-      const tree = buildTree(streetTree(sb, pot, left, extra, jam));
-      // 턴을 리버까지 풀면 작은 트리로도 반복 한 번에 0.12초라 2초에 12번(익스플로잇 4.5%)밖에 못 돈다(2026-11-17 측정). 그래서 리버만 끝까지 푼다
-      solver = si === 2 ? fullSolver(tree, w[0], w[1]) : new StreetSolver(tree, w[0], w[1]);
+      const tc = streetTree(sb, pot, left, extra, jam);
+      if (si === 2) solver = fullSolver(buildTree(tc), w[0], w[1]);
+      else if (!looks) solver = streetSub(buildTree(tc), w[0], w[1], current ? PAIR_NOW : PAIR_REPLAY);
+      else {
+        const lo = si === 0 ? (long ? FLOP_LOOK_LONG : FLOP_LOOK) : long ? TURN_LOOK_LONG : TURN_LOOK;
+        solver = lookSub(opts.ports?.length ? await lookaheadOnPorts(opts.ports, tc, w[0], w[1], lo) : new LookaheadSolver(tc, w[0], w[1], lo));
+      }
       if (cache.size >= 8) cache.clear();
       cache.set(key, solver);
     }
     if (fresh || current) {
-      const limit = current ? deadline - 250 : Math.min(deadline, Date.now() + REPLAY_MS[si]);
-      while (solver.iterations < MIN_ITER || (solver.iterations < MAX_ITER && Date.now() < limit)) solver.step(2);
+      while (solver.iterations < MIN_ITER[si] || (solver.iterations < MAX_ITER && Date.now() < limit)) await solver.step(1);
     }
 
     // 이 스트리트의 실제 액션대로 트리를 따라가며 두 사람의 레인지를 좁힌다
@@ -521,7 +623,7 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
       }
       const mapped = at.actions[idx].amount;
       if (to > before && Math.abs(mapped - (to - before)) / (to - before) > 0.35) note(`${name}: ${a.pos} 의 ${r2(to - before)}bb 를 트리의 ${mapped}bb 로 보고 계산했습니다(크기 차이 큼)`);
-      const avg = solver.analyze(at, rs).strategy;
+      const avg = solver.strategy(at);
       const r = rs[at.player];
       const next = new Float32Array(n);
       let tot = 0;
@@ -541,7 +643,7 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
 
     if (current) {
       if (at.kind !== "decision" || at.player !== pair.indexOf(hero) || !live.includes(hero)) throw new Error("지금은 내 차례가 아닙니다");
-      const an = solver.analyze(at, rs);
+      const an = await solver.analyze(at, rs);
       const slot = solver.hands.slotOfCombo[combo];
       const options = at.actions.map((x, k) => ({ type: x.type, label: x.label, amount: x.amount, freq: r3(an.strategy[k * n + slot]), ev: r3(an.ev[k * n + slot]) }));
       if (rare) {
@@ -550,13 +652,14 @@ export async function decide(spot: Spot, opts: DecideOptions): Promise<Decision>
         options.forEach((o, k) => (o.freq = k === best ? 1 : 0));
         note("상대의 직전 액션이 GTO 라인에 드물어, 빈도 대신 EV 가 가장 높은 액션을 골랐습니다");
       }
-      // 측정(2026-11-17, K72 플랍 BTN 대 BB): 페어를 콜 대신 레이즈하는 쪽으로 치우친다 → 뒤 스트리트 레인지도 약해진다
-      if (name !== "river") note("플랍·턴은 지금 스트리트만 푸는 근사라 GTO 와 차이가 납니다(만든 패를 레이즈 쪽으로 과하게 고르는 편향 확인됨)");
+      if (solver.kind === "look" && solver.iterations < LOOK_NEED[si]) note(`깊이 제한 풀이를 시간 안에 ${solver.iterations}회밖에 못 돌아 수렴이 덜 됐을 수 있습니다 (CPU 가 바쁘거나 트리가 큼)`);
+      if (solver.kind === "look" && name === "flop") note(`플랍은 지금 스트리트를 풀고, 턴·리버는 실제 카드 ${solver.runouts}쌍을 딜해 두 스트리트 베팅을 팟 크기 한 라운드로 합쳐 푼 깊이 제한 근사입니다`);
+      else if (solver.kind === "look") note(`턴은 리버 카드 ${solver.runouts}장을 딜해 리버 베팅(75% 한 크기)까지 푼 깊이 제한 근사입니다`);
+      else if (solver.kind === "street") note(`${name === "flop" ? "플랍" : "턴"}은 지금 스트리트만 푸는 근사라 GTO 와 차이가 납니다(만든 패를 레이즈 쪽으로 과하게 고르는 편향 확인됨)`);
       else note("리버는 끝까지 푼 값이지만, 상대 레인지는 근사인 플랍·턴 풀이에서 넘어온 것입니다");
-      if (solver.sampled) note(`승률은 런아웃 ${solver.runouts}개 표본으로 계산했습니다`);
-      const expl = r3(solver.metrics().exploitabilityPct);
+      const expl = solver.metrics ? r3(solver.metrics().exploitabilityPct) : undefined;
       // 측정(2026-11-17): 다른 프로그램이 CPU 를 쓰는 동안에는 리버가 400회 대신 10회만 돌아 4.7% 에서 멈췄다
-      if (expl > UNCONVERGED_PCT) note(`시간 안에 수렴하지 못했습니다(반복 ${solver.iterations}회, 익스플로잇 ${expl}%). 다른 프로그램이 CPU 를 쓰고 있으면 이렇게 되고, 이 답은 믿기 어렵습니다`);
+      if (expl !== undefined && expl > UNCONVERGED_PCT) note(`시간 안에 수렴하지 못했습니다(반복 ${solver.iterations}회, 익스플로잇 ${expl}%). 다른 프로그램이 CPU 를 쓰고 있으면 이렇게 되고, 이 답은 믿기 어렵습니다`);
       return { street: name, options, pick: choose(options, opts.rng), source: "street-solve", format, iterations: solver.iterations, exploitabilityPct: expl, ms: Date.now() - t0, notes };
     }
 

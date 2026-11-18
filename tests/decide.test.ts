@@ -7,6 +7,7 @@ import { PostflopSolver } from "../src/engine/solver";
 import { StreetSolver } from "../src/engine/street";
 import { buildTree, type TreeConfig } from "../src/engine/tree";
 import { decide, multiwayEquity, type Spot } from "../src/lib/decide";
+import { LocalSubPort } from "../src/engine/parallel";
 import { CLASS_N, type PfLib } from "../src/lib/preflopLib";
 
 const one = { bet: [66], raise: [] as number[] };
@@ -61,24 +62,24 @@ const folds = (...pos: string[]) => pos.map((p) => ({ pos: p, type: "fold" as co
 
 describe.skipIf(!lib)("decide — 프리플랍", () => {
   it("8명 UTG: AA 는 오픈, 72o 는 폴드", async () => {
-    const aa = await decide({ players: 8, hero: "UTG", cards: "AsAh", stack: 40, preflop: [] }, { preflop });
+    const aa = await decide({ players: 8, hero: "UTG", cards: "AsAh", stack: 40, preflop: [] }, { preflop, budgetMs: 2500 });
     expect(aa.street).toBe("preflop");
     expect(aa.source).toBe("library");
     expect(aa.options[aa.pick].type).toBe("raise");
-    const junk = await decide({ players: 8, hero: "UTG", cards: "7s2h", stack: 40, preflop: [] }, { preflop });
+    const junk = await decide({ players: 8, hero: "UTG", cards: "7s2h", stack: 40, preflop: [] }, { preflop, budgetMs: 2500 });
     expect(junk.options[junk.pick].type).toBe("fold");
   });
 
   it("6명이면 LJ 가 첫 행동자, BB 는 BTN 오픈에 방어 빈도를 받는다", async () => {
-    const lj = await decide({ players: 6, hero: "LJ", cards: "AsKs", stack: 40, preflop: [] }, { preflop });
+    const lj = await decide({ players: 6, hero: "LJ", cards: "AsKs", stack: 40, preflop: [] }, { preflop, budgetMs: 2500 });
     expect(lj.options[lj.pick].type).toBe("raise");
-    const bb = await decide({ players: 6, hero: "BB", cards: "Ts9s", stack: 40, preflop: [...folds("LJ", "HJ", "CO"), { pos: "BTN", type: "raise", to: 2.2 }, ...folds("SB")] }, { preflop });
+    const bb = await decide({ players: 6, hero: "BB", cards: "Ts9s", stack: 40, preflop: [...folds("LJ", "HJ", "CO"), { pos: "BTN", type: "raise", to: 2.2 }, ...folds("SB")] }, { preflop, budgetMs: 2500 });
     expect(freqOf(bb, "fold")).toBeLessThan(0.05);
     expect(bb.options.reduce((s, o) => s + o.freq, 0)).toBeCloseTo(1, 2);
   });
 
   it("앞사람 액션이 빠지면 폴드로 보고 답하며 알려 준다", async () => {
-    const d = await decide({ players: 6, hero: "BB", cards: "Ts9s", stack: 40, preflop: [] }, { preflop });
+    const d = await decide({ players: 6, hero: "BB", cards: "Ts9s", stack: 40, preflop: [] }, { preflop, budgetMs: 2500 });
     expect(d.notes.join(" ")).toContain("LJ 의 프리플랍 액션이 기록에 없어");
     expect(d.options[d.pick].type).toBe("check"); // 모두 폴드한 것으로 보면 BB 는 할 일이 없다
   });
@@ -218,20 +219,22 @@ describe.skipIf(!lib)("decide — 포스트플랍 (스트리트마다 3초 안)"
   const base: Spot = { players: 8, hero: "BTN", cards: "AsKd", stack: 40, preflop: [...folds("UTG", "UTG1", "LJ", "HJ", "CO"), { pos: "BTN", type: "raise", to: 2.2 }, ...folds("SB"), { pos: "BB", type: "call" }] };
 
   it("플랍 → 턴 → 리버를 처음 보는 상태에서 각각 3초 안에 답한다", async () => {
-    const flop = await decide({ ...base, cards: "QsJd", board: "Ks7d2c", flop: [{ pos: "BB", type: "check" }] }, { preflop });
+    const flop = await decide({ ...base, cards: "QsJd", board: "Ks7d2c", flop: [{ pos: "BB", type: "check" }] }, { preflop, budgetMs: 2500 });
     expect(flop.street).toBe("flop");
     expect(flop.ms).toBeLessThan(3000);
     expect(flop.options.reduce((s, o) => s + o.freq, 0)).toBeCloseTo(1, 2);
     expect(flop.options.map((o) => o.type)).toContain("check");
 
-    const turn = await decide({ ...base, cards: "QhJh", board: "Ts7d2c9h", flop: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "check" }], turn: [{ pos: "BB", type: "bet", to: 3.5 }] }, { preflop });
+    const turn = await decide({ ...base, cards: "QhJh", board: "Ts7d2c9h", flop: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "check" }], turn: [{ pos: "BB", type: "bet", to: 3.5 }] }, { preflop, budgetMs: 2500 });
     expect(turn.street).toBe("turn");
     expect(turn.ms).toBeLessThan(3000);
     expect(turn.options.map((o) => o.type)).toEqual(expect.arrayContaining(["fold", "call"]));
+    // 턴은 한 스레드로도 깊이 제한(리버 카드를 딜해 리버 베팅까지)으로 푼다
+    expect(turn.notes.join(" ")).toContain("리버 카드 8장을 딜해");
 
     const river = await decide(
       { ...base, cards: "AhKh", board: "Th7h2c9s3h", flop: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "bet", to: 1.8 }, { pos: "BB", type: "call" }], turn: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "check" }], river: [{ pos: "BB", type: "bet", to: 6 }] },
-      { preflop }
+      { preflop, budgetMs: 2500 }
     );
     expect(river.street).toBe("river");
     expect(river.ms).toBeLessThan(3000);
@@ -239,10 +242,32 @@ describe.skipIf(!lib)("decide — 포스트플랍 (스트리트마다 3초 안)"
     expect(freqOf(river, "fold")).toBeLessThan(0.02);
   });
 
+  it("리버 결정 때 다시 풀어 둔 턴 근사는 그 뒤 턴 결정에 쓰지 않고 깊이 제한으로 다시 푼다", async () => {
+    const hand = { ...base, cards: "Ah5h", board: "Qd8s3c6h", flop: [{ pos: "BB" as const, type: "check" as const }, { pos: "BTN" as const, type: "check" as const }] };
+    await decide({ ...hand, board: "Qd8s3c6h2d", turn: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "check" }], river: [{ pos: "BB", type: "check" }] }, { preflop, budgetMs: 1500 });
+    const turn = await decide({ ...hand, turn: [{ pos: "BB", type: "check" }] }, { preflop, budgetMs: 2500 });
+    expect(turn.notes.join(" ")).toContain("리버 카드 8장을 딜해");
+  });
+
+  it("기본 예산(5초)이면 하위 솔버 없이도 플랍을 깊이 제한으로 풀고 5.5초 안에 답한다", async () => {
+    const d = await decide({ ...base, cards: "QsJd", board: "Ks7d2c", flop: [{ pos: "BB", type: "check" }] }, { preflop });
+    expect(d.street).toBe("flop");
+    expect(d.ms).toBeLessThan(5500);
+    expect(d.notes.join(" ")).toContain("쌍을 딜해");
+  });
+
+  it("하위 솔버(ports)를 주면 플랍도 깊이 제한으로 풀고 3초 안에 답한다", async () => {
+    const d = await decide({ ...base, cards: "QsJd", board: "Ks7d2c", flop: [{ pos: "BB", type: "check" }] }, { preflop, budgetMs: 2500, ports: [new LocalSubPort(), new LocalSubPort()] });
+    expect(d.street).toBe("flop");
+    expect(d.ms).toBeLessThan(3000);
+    expect(d.notes.join(" ")).toContain("12쌍을 딜해");
+    expect(d.options.reduce((s, o) => s + o.freq, 0)).toBeCloseTo(1, 2);
+  });
+
   it("리버에서 아무것도 못 이기는 핸드는 큰 벳에 콜하지 않는다", async () => {
     const d = await decide(
       { ...base, cards: "5s4s", board: "AhKc9d8h2c", flop: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "check" }], turn: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "check" }], river: [{ pos: "BB", type: "bet", to: 5 }] },
-      { preflop }
+      { preflop, budgetMs: 2500 }
     );
     expect(freqOf(d, "call")).toBeLessThan(0.02);
     // 리버는 끝까지 풀어서 주어진 레인지 안에서는 거의 수렴한다
@@ -251,27 +276,48 @@ describe.skipIf(!lib)("decide — 포스트플랍 (스트리트마다 3초 안)"
 
   it("상대 올인은 올인 금액 그대로 콜 여부를 묻는다", async () => {
     const jam = { board: "Ks7d2c9h", flop: [{ pos: "BB", type: "check" as const }, { pos: "BTN", type: "check" as const }], turn: [{ pos: "BB", type: "bet" as const, allin: true }] };
-    const air = await decide({ ...base, cards: "5d4d", ...jam }, { preflop });
+    const air = await decide({ ...base, cards: "5d4d", ...jam }, { preflop, budgetMs: 2500 });
     expect(air.options.find((o) => o.type === "call")!.amount).toBeCloseTo(37.8, 1); // 40 − 프리플랍 2.2
     expect(air.options[air.pick].type).toBe("fold"); // 5 하이로 팟의 6배 올인은 콜하지 않는다
-    const set = await decide({ ...base, cards: "KhKc", ...jam }, { preflop });
+    const set = await decide({ ...base, cards: "KhKc", ...jam }, { preflop, budgetMs: 2500 });
     expect(set.options[set.pick].type).toBe("call");
   });
 
   it("지나간 스트리트에 콜이 빠져 있으면 알려 준다", async () => {
-    await expect(decide({ ...base, board: "Ks7d2c9h", flop: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "bet", to: 1.8 }], turn: [{ pos: "BB", type: "check" }] }, { preflop })).rejects.toThrow("끝나지 않았는데");
+    await expect(decide({ ...base, board: "Ks7d2c9h", flop: [{ pos: "BB", type: "check" }, { pos: "BTN", type: "bet", to: 1.8 }], turn: [{ pos: "BB", type: "check" }] }, { preflop, budgetMs: 2500 })).rejects.toThrow("끝나지 않았는데");
   });
 
-  it("3명 팟도 답하고, 줄여 푼 근사임을 알려 준다", async () => {
-    const d = await decide(
-      { players: 8, hero: "BB", cards: "9s8s", stack: 40, board: "7s6d2c", preflop: [...folds("UTG", "UTG1", "LJ", "HJ"), { pos: "CO", type: "raise", to: 2.2 }, { pos: "BTN", type: "call" }, ...folds("SB"), { pos: "BB", type: "call" }], flop: [] },
-      { preflop }
-    );
+  const three: Spot = { players: 8, hero: "BB", cards: "9s8s", stack: 40, board: "7s6d2c", preflop: [...folds("UTG", "UTG1", "LJ", "HJ"), { pos: "CO", type: "raise", to: 2.2 }, { pos: "BTN", type: "call" }, ...folds("SB"), { pos: "BB", type: "call" }] };
+
+  it("3명 팟은 셋을 모두 넣어 풀고 3초 안에 답한다", async () => {
+    const d = await decide({ ...three, flop: [] }, { preflop, budgetMs: 2500 });
     expect(d.street).toBe("flop");
-    expect(d.notes.join(" ")).toContain("3명 이상");
+    expect(d.ms).toBeLessThan(3000);
+    expect(d.options.reduce((s, o) => s + o.freq, 0)).toBeCloseTo(1, 2);
+    expect(d.notes.join(" ")).toContain("3명 팟을 모두 넣어 풀었습니다");
+  });
+
+  it("3명 팟 플랍: 벳과 콜을 받으면 셋은 폴드하지 않고 에어는 폴드한다", async () => {
+    const flop = [{ pos: "BB", type: "check" as const }, { pos: "CO", type: "bet" as const, to: 2.4 }, { pos: "BTN", type: "call" as const }];
+    const set = await decide({ ...three, cards: "2h2d", flop }, { preflop, budgetMs: 2500 });
+    expect(freqOf(set, "fold")).toBeLessThan(0.02);
+    const air = await decide({ ...three, cards: "KcJh", flop }, { preflop, budgetMs: 2500 });
+    expect(freqOf(air, "fold")).toBeGreaterThan(0.8);
+  });
+
+  it("3명 팟 리버도 끝까지 풀어 답하고, 플랍에서 한 명이 폴드하면 턴부터는 둘의 깊이 제한으로 푼다", async () => {
+    const xxx = (...pos: string[]) => pos.map((p) => ({ pos: p, type: "check" as const }));
+    const river = await decide({ ...three, cards: "AhQh", board: "7s6d2cKh3d", flop: xxx("BB", "CO", "BTN"), turn: xxx("BB", "CO", "BTN"), river: [{ pos: "BB", type: "check" }, { pos: "CO", type: "bet", to: 5 }, { pos: "BTN", type: "fold" }] }, { preflop, budgetMs: 2500 });
+    expect(river.street).toBe("river");
+    expect(river.ms).toBeLessThan(3000);
+    expect(river.notes.join(" ")).toContain("리버 끝까지");
+    const hu = await decide({ ...three, board: "7s6d2cKh", flop: [{ pos: "BB", type: "check" }, { pos: "CO", type: "bet", to: 2.4 }, { pos: "BTN", type: "fold" }, { pos: "BB", type: "call" }], turn: [] }, { preflop, budgetMs: 2500 });
+    expect(hu.street).toBe("turn");
+    expect(hu.notes.join(" ")).toContain("리버 카드 8장을 딜해");
+    expect(hu.notes.join(" ")).not.toContain("명 팟");
   });
 
   it("내 차례가 아니면 알려 준다", async () => {
-    await expect(decide({ ...base, board: "Ks7d2c", flop: [] }, { preflop })).rejects.toThrow("내 차례");
+    await expect(decide({ ...base, board: "Ks7d2c", flop: [] }, { preflop, budgetMs: 2500 })).rejects.toThrow("내 차례");
   });
 });

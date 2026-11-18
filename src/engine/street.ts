@@ -31,7 +31,9 @@ export class StreetSolver {
     readonly tree: GameTree,
     w0: RangeWeights,
     w1: RangeWeights,
-    seed = 1
+    seed = 1,
+    /** 승률 행렬의 쌍 비교 한도 (작을수록 빨리 만들고 런아웃 표본이 준다) */
+    budget = PAIR_BUDGET
   ) {
     const board = tree.config.board;
     this.hands = buildHandSet(board, w0, w1);
@@ -39,72 +41,10 @@ export class StreetSolver {
     if (n === 0) throw new Error("레인지에 보드와 겹치지 않는 핸드가 없습니다");
     this.w = [Float32Array.from(this.hands.combo, (c) => w0[c]), Float32Array.from(this.hands.combo, (c) => w1[c])];
 
-    const live: number[] = [];
-    for (let c = 0; c < 52; c++) if (!board.includes(c)) live.push(c);
-    let runs: number[][] = [[]];
-    if (board.length === 4) runs = live.map((c) => [c]);
-    if (board.length === 3) {
-      runs = [];
-      for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) runs.push([live[i], live[j]]);
-    }
-    const max = Math.max(MIN_RUNOUTS, Math.floor(PAIR_BUDGET / ((n * n) / 2)));
-    this.sampled = runs.length > max;
-    if (this.sampled) {
-      const rnd = mulberry32(seed);
-      for (let i = 0; i < max; i++) {
-        const j = i + Math.floor(rnd() * (runs.length - i));
-        [runs[i], runs[j]] = [runs[j], runs[i]];
-      }
-      runs.length = max;
-    }
-    this.runouts = runs.length;
-    this.E = this.equityMatrix(runs);
-  }
-
-  private equityMatrix(runs: number[][]): Float32Array {
-    const { n } = this;
-    const { a, b } = this.hands;
-    const board = this.tree.config.board;
-    const win = new Float32Array(n * n); // 위쪽 삼각형만 쓴다
-    const cnt = new Float32Array(n * n);
-    const str = new Int32Array(n);
-    const cards = new Array<number>(7);
-    for (const run of runs) {
-      const full = board.concat(run);
-      for (let k = 0; k < 5; k++) cards[k] = full[k];
-      for (let h = 0; h < n; h++) {
-        if (run.includes(a[h]) || run.includes(b[h])) {
-          str[h] = -1;
-          continue;
-        }
-        cards[5] = a[h];
-        cards[6] = b[h];
-        str[h] = evaluate(cards, 7);
-      }
-      for (let i = 0; i < n; i++) {
-        const si = str[i];
-        if (si < 0) continue;
-        const row = i * n;
-        for (let j = i + 1; j < n; j++) {
-          const sj = str[j];
-          if (sj < 0) continue;
-          cnt[row + j]++;
-          if (si > sj) win[row + j]++;
-          else if (si === sj) win[row + j] += 0.5;
-        }
-      }
-    }
-    const E = new Float32Array(n * n);
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        if (a[i] === a[j] || a[i] === b[j] || b[i] === a[j] || b[i] === b[j]) continue;
-        const c = cnt[i * n + j];
-        const e = c > 0 ? win[i * n + j] / c : 0.5;
-        E[i * n + j] = e;
-        E[j * n + i] = 1 - e;
-      }
-    }
-    return E;
+    const pe = pairEquity(this.hands, board, budget, seed);
+    this.runouts = pe.runouts;
+    this.sampled = pe.sampled;
+    this.E = pe.E;
   }
 
   /** 슬롯 i가 슬롯 j를 이길 확률 (카드가 겹치면 0) */
@@ -310,4 +250,74 @@ export class StreetSolver {
     });
     return { strategy: this.average(node), ev };
   }
+}
+
+/**
+ * 핸드 쌍 승률 행렬 (n×n, 행 핸드가 열 핸드를 이길 확률, 동률 0.5, 카드가 겹치는 쌍은 0).
+ * 남은 런아웃을 전부 보되, 쌍 비교 횟수가 budget 을 넘으면 런아웃을 표본으로 뽑는다.
+ * rows = [lo, hi) 를 주면 그 행만 ((hi−lo)×n, 병렬 하위 솔버가 나눠 맡을 때). 런아웃 표본은 같은 seed 면 같다
+ */
+export function pairEquity(hands: HandSet, board: number[], budget = PAIR_BUDGET, seed = 1, rows?: [number, number]): { E: Float32Array; runouts: number; sampled: boolean } {
+  const n = hands.n;
+  const live: number[] = [];
+  for (let c = 0; c < 52; c++) if (!board.includes(c)) live.push(c);
+  let runs: number[][] = [[]];
+  if (board.length === 4) runs = live.map((c) => [c]);
+  if (board.length === 3) {
+    runs = [];
+    for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) runs.push([live[i], live[j]]);
+  }
+  const max = Math.max(MIN_RUNOUTS, Math.floor(budget / ((n * n) / 2)));
+  const sampled = runs.length > max;
+  if (sampled) {
+    const rnd = mulberry32(seed);
+    for (let i = 0; i < max; i++) {
+      const j = i + Math.floor(rnd() * (runs.length - i));
+      [runs[i], runs[j]] = [runs[j], runs[i]];
+    }
+    runs.length = max;
+  }
+  const { a, b } = hands;
+  const [lo, hi] = rows ?? [0, n];
+  const part = rows !== undefined;
+  const win = new Float32Array((hi - lo) * n); // 전체면 위쪽 삼각형만 쓴다
+  const cnt = new Float32Array((hi - lo) * n);
+  const str = new Int32Array(n);
+  const cards = new Array<number>(7);
+  for (const run of runs) {
+    const full = board.concat(run);
+    for (let k = 0; k < 5; k++) cards[k] = full[k];
+    for (let h = 0; h < n; h++) {
+      if (run.includes(a[h]) || run.includes(b[h])) {
+        str[h] = -1;
+        continue;
+      }
+      cards[5] = a[h];
+      cards[6] = b[h];
+      str[h] = evaluate(cards, 7);
+    }
+    for (let i = lo; i < hi; i++) {
+      const si = str[i];
+      if (si < 0) continue;
+      const row = (i - lo) * n;
+      for (let j = part ? 0 : i + 1; j < n; j++) {
+        const sj = str[j];
+        if (sj < 0) continue;
+        cnt[row + j]++;
+        if (si > sj) win[row + j]++;
+        else if (si === sj) win[row + j] += 0.5;
+      }
+    }
+  }
+  const E = new Float32Array((hi - lo) * n);
+  for (let i = lo; i < hi; i++) {
+    for (let j = part ? 0 : i + 1; j < n; j++) {
+      if (a[i] === a[j] || a[i] === b[j] || b[i] === a[j] || b[i] === b[j]) continue;
+      const k = (i - lo) * n + j;
+      const e = cnt[k] > 0 ? win[k] / cnt[k] : 0.5;
+      E[k] = e;
+      if (!part) E[j * n + i] = 1 - e;
+    }
+  }
+  return { E, runouts: runs.length, sampled };
 }

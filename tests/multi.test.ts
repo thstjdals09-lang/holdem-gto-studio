@@ -18,6 +18,46 @@ function hcfg(board: string, sizes = one): TreeConfig {
   return { board: parseCards(board), pot: 10, effStack: 20, rakePct: 0, rakeCap: 0, oop: { flop: sizes, turn: sizes, river: sizes }, ip: { flop: sizes, turn: sizes, river: sizes }, allinThresholdPct: 0, maxRaisesPerStreet: 1, allowDonk: true, includeAllin: false };
 }
 
+describe("멀티웨이 솔버 — 표본 런아웃·근사 쇼다운 (결정 모델용)", () => {
+  it("표본에 리버를 전부 넣으면 전체 솔버와 같은 값 (2인 턴)", () => {
+    const board = parseCards("2c7d9hJs");
+    const rivers = [...Array(52).keys()].filter((c) => !board.includes(c)).map((c) => [c]);
+    const full = new MultiSolver(buildMultiTree(mcfg("2c7d9hJs", 2)), [oop, ip]);
+    const smp = new MultiSolver(buildMultiTree(mcfg("2c7d9hJs", 2)), [oop, ip], { runouts: rivers });
+    full.step(40);
+    smp.step(40);
+    const a = full.metrics();
+    const b = smp.metrics();
+    expect(b.ev[0]).toBeCloseTo(a.ev[0], 2);
+    expect(b.ev[1]).toBeCloseTo(a.ev[1], 2);
+  });
+
+  it("표본 런아웃(턴·리버 쌍, 턴 베팅 없음)으로도 EV 합은 팟이고 익스플로잇어빌리티가 줄어든다 (3인 플랍)", () => {
+    const board = parseCards("2c7d9h");
+    const deck = [...Array(52).keys()].filter((c) => !board.includes(c));
+    const pairs = Array.from({ length: 8 }, (_, i) => [deck[i * 3], deck[i * 3 + 1]]);
+    const tree = buildMultiTree({ ...mcfg("2c7d9h", 3), sizes: { flop: one, turn: none, river: none } });
+    const mu = new MultiSolver(tree, [oop, ip, third], { runouts: pairs, approx: true });
+    mu.step(3);
+    const m1 = mu.metrics();
+    mu.step(40);
+    const m2 = mu.metrics();
+    // 사람마다 만난 상대 질량으로 정규화해서 표본이 적으면 합이 팟에서 조금 벗어난다 (쌍 8개에서 1% 안팎)
+    expect(Math.abs(m2.ev[0] + m2.ev[1] + m2.ev[2] - 10)).toBeLessThan(0.15);
+    expect(m2.exploitabilityPct).toBeLessThan(m1.exploitabilityPct);
+  });
+
+  it("근사 쇼다운(상대끼리 카드 겹침 무시)은 정확한 3인 리버 값과 팟의 2% 안", () => {
+    const exact = new MultiSolver(buildMultiTree(mcfg("2c7d9hJsKd", 3)), [oop, ip, third]);
+    const approx = new MultiSolver(buildMultiTree(mcfg("2c7d9hJsKd", 3)), [oop, ip, third], { approx: true });
+    exact.step(60);
+    approx.step(60);
+    const a = exact.metrics();
+    const b = approx.metrics();
+    for (let q = 0; q < 3; q++) expect(Math.abs(b.ev[q] - a.ev[q])).toBeLessThan(0.2);
+  });
+});
+
 describe("멀티웨이 솔버", () => {
   it("2인이면 HU 솔버와 같은 값 (리버)", () => {
     const hu = new PostflopSolver(buildTree(hcfg("2c7d9hJsKd")), oop, ip);

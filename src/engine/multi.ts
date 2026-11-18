@@ -284,6 +284,8 @@ export interface MCtx {
   board: number[];
   tIdx: number;
   rIdx: number;
+  /** (턴, 리버) 쌍 표본에서 다음 찬스에 딜할 리버 (첫 찬스가 정해 둔다) */
+  next?: number;
 }
 export type MPathStep = { kind: "action"; index: number } | { kind: "card"; card: number };
 
@@ -299,6 +301,17 @@ export interface MDecisionAnalysis {
   actionEv: number[];
   rangeEv: number;
   rangeEquity: number;
+}
+
+export interface MultiSolverOptions {
+  /**
+   * 표본 런아웃: 시작 보드에 더할 카드 (턴 시작이면 [리버], 플랍 시작이면 [턴, 리버]).
+   * 주면 찬스 노드에서 이 카드들만 딜하고, 핸드마다 만난 상대 질량으로 나눠 딜하지 않는 잎(폴드 등)과 단위를 맞춘다.
+   * 후회 테이블도 표본 수만큼만 잡는다 (결정 모델의 깊이 제한 멀티웨이 풀이용)
+   */
+  runouts?: number[][];
+  /** 상대 2명일 때도 쇼다운·조합 질량을 상대끼리의 카드 겹침을 무시한 독립 근사로 (3인 쇼다운이 수십 배 빠르다) */
+  approx?: boolean;
 }
 
 const ALPHA = 1.5;
@@ -339,10 +352,17 @@ export class MultiSolver {
   private cumc: Float64Array[];
   private grpAll: Float64Array;
   private grpc: Float64Array[];
+  private indW: Float64Array[] = [];
+  private indE: Float64Array[] = [];
   private slotPair = new Int32Array(52 * 52);
 
-  constructor(tree: MultiTree, ranges: RangeWeights[]) {
+  /** 표본 런아웃: 첫 카드 목록과 카드 → 번호, (첫 카드 번호 × 52 + 둘째 카드) → 쌍 번호, 쌍 목록 */
+  private sample: { first: number[]; firstIdx: Int16Array; pairIdx: Map<number, number>; pairList: Array<[number, number]>; pairs: number } | null = null;
+  private approx: boolean;
+
+  constructor(tree: MultiTree, ranges: RangeWeights[], opts: MultiSolverOptions = {}) {
     this.tree = tree;
+    this.approx = !!opts.approx;
     this.P = tree.config.players;
     if (ranges.length !== this.P) throw new Error("레인지 수가 플레이어 수와 다릅니다");
     const dead = new Set(tree.config.board);
@@ -385,13 +405,41 @@ export class MultiSolver {
       this.remaining.push(c);
     }
     this.R = this.remaining.length;
+    if (opts.runouts) {
+      const firstIdx = new Int16Array(52).fill(-1);
+      const first: number[] = [];
+      const pairIdx = new Map<number, number>();
+      const pairList: Array<[number, number]> = [];
+      for (const ro of opts.runouts) {
+        if (ro.length < 1 || ro.length > 2 || ro.some((c) => dead.has(c)) || ro[0] === ro[1]) throw new Error("런아웃 카드가 잘못됐습니다");
+        // 쌍이면 턴 카드가 모두 달라야 턴 결정이 반복마다 한 번씩만 갱신된다
+        if (firstIdx[ro[0]] >= 0) throw new Error("런아웃 표본의 첫 카드가 겹칩니다");
+        const i = (firstIdx[ro[0]] = first.length);
+        first.push(ro[0]);
+        if (ro.length === 2) {
+          pairIdx.set(i * 52 + ro[1], pairList.length);
+          pairList.push([ro[0], ro[1]]);
+        }
+      }
+      if (pairList.length && pairList.length !== first.length) throw new Error("런아웃 표본은 모두 한 장이거나 모두 두 장이어야 합니다");
+      this.sample = { first, firstIdx, pairIdx, pairList, pairs: pairList.length };
+    }
     this.mult = new Int32Array(tree.decisionNodes.length);
     this.regret = [];
     this.stratSum = [];
     for (const d of tree.decisionNodes) {
+      const lv = d.street - tree.startStreet;
       let m = 1;
-      if (d.street > tree.startStreet) m *= this.R;
-      if (d.street > tree.startStreet + 1) m *= this.R;
+      if (this.sample) {
+        if (lv === 1) m = this.sample.first.length;
+        if (lv === 2) {
+          if (!this.sample.pairs) throw new Error("두 스트리트 뒤 노드가 있으면 런아웃은 두 장씩이어야 합니다");
+          m = this.sample.pairs;
+        }
+      } else {
+        if (lv >= 1) m *= this.R;
+        if (lv >= 2) m *= this.R;
+      }
       this.mult[d.id] = m;
       this.regret.push(new Float32Array(m * d.actions.length * this.n));
       this.stratSum.push(new Float32Array(m * d.actions.length * this.n));
@@ -490,7 +538,7 @@ export class MultiSolver {
       for (let h = 0; h < n; h++) out[h] = T - tc[this.ha[h]] - tc[this.hb[h]] + r[j][h];
       return;
     }
-    if (opps.length === 2) {
+    if (opps.length === 2 && !this.approx) {
       const [j1, j2] = opps;
       const r1 = r[j1];
       const r2v = r[j2];
@@ -606,11 +654,11 @@ export class MultiSolver {
       const actJ = active[j];
       let cumAll = 0;
       let i = 0;
+      gc.fill(0); // 그룹마다 건드린 칸만 0 으로 되돌린다
       while (i < m) {
         let e = i;
         const s = strength[order[i]];
         let gAll = 0;
-        gc.fill(0);
         while (e < m && strength[order[e]] === s) {
           const h = order[e];
           const v = rj[h];
@@ -638,12 +686,14 @@ export class MultiSolver {
           cumAll += v;
           cum[ha[h]] += v;
           cum[hb[h]] += v;
+          gc[ha[h]] = 0;
+          gc[hb[h]] = 0;
         }
         i = e;
       }
       return;
     }
-    if (k === 2) {
+    if (k === 2 && !this.approx) {
       const [j1, j2] = opps;
       const r1 = r[j1];
       const r2v = r[j2];
@@ -809,9 +859,10 @@ export class MultiSolver {
       }
       return;
     }
-    // k >= 3: 독립 근사 (상대 간 카드 겹침 무시)
-    const Wv: Float64Array[] = opps.map(() => new Float64Array(n));
-    const Ev: Float64Array[] = opps.map(() => new Float64Array(n));
+    // k >= 3 (또는 approx): 독립 근사 (상대 간 카드 겹침 무시)
+    // 쇼다운은 재귀하지 않아 상대별 작업 버퍼를 하나씩만 둔다 (호출마다 만들면 GC 가 반복 시간을 잡아먹었다)
+    const Wv = opps.map((_, oi) => (this.indW[oi] ??= new Float64Array(n)));
+    const Ev = opps.map((_, oi) => (this.indE[oi] ??= new Float64Array(n)));
     for (let oi = 0; oi < k; oi++) {
       const j = opps[oi];
       const rj = r[j];
@@ -819,11 +870,11 @@ export class MultiSolver {
       const gc = this.grpc[j];
       let cumAll = 0;
       let i = 0;
+      gc.fill(0); // 그룹마다 건드린 칸만 0 으로 되돌린다
       while (i < m) {
         let e = i;
         const s = strength[order[i]];
         let gAll = 0;
-        gc.fill(0);
         while (e < m && strength[order[e]] === s) {
           const h = order[e];
           const v = rj[h];
@@ -843,6 +894,8 @@ export class MultiSolver {
           cumAll += v;
           cum[ha[h]] += v;
           cum[hb[h]] += v;
+          gc[ha[h]] = 0;
+          gc[hb[h]] = 0;
         }
         i = e;
       }
@@ -863,10 +916,11 @@ export class MultiSolver {
   }
 
   private offset(d: MDecision, ctx: MCtx): number {
-    const m = this.mult[d.id];
-    if (m === 1) return 0;
+    const lv = d.street - this.tree.startStreet;
+    if (lv <= 0) return 0;
     const A = d.actions.length * this.n;
-    if (m === this.R) return ctx.tIdx * A;
+    if (this.sample) return (lv === 1 ? ctx.tIdx : ctx.rIdx) * A; // 표본이면 tIdx 는 첫 카드 번호, rIdx 는 쌍 번호
+    if (lv === 1) return ctx.tIdx * A;
     return (ctx.tIdx * this.R + ctx.rIdx) * A;
   }
 
@@ -909,7 +963,64 @@ export class MultiSolver {
 
   nextCtx(ctx: MCtx, node: MChance, c: number): MCtx {
     const level = node.street - this.tree.startStreet;
+    const sm = this.sample;
+    if (sm) {
+      const t = level === 1 ? sm.firstIdx[c] : ctx.tIdx;
+      const r = level === 2 ? (sm.pairIdx.get(ctx.tIdx * 52 + c) ?? -1) : ctx.rIdx;
+      if (t < 0 || (level === 2 && r < 0)) throw new Error("표본에 없는 런아웃입니다");
+      return { board: ctx.board.concat([c]), tIdx: t, rIdx: r };
+    }
     return { board: ctx.board.concat([c]), tIdx: level === 1 ? this.cardIdx[c] : ctx.tIdx, rIdx: level === 2 ? this.cardIdx[c] : ctx.rIdx };
+  }
+
+  /**
+   * 표본 런아웃의 찬스 노드: 표본마다 그 카드(쌍이면 두 장 모두)와 겹치는 핸드를 빼고 더한 뒤, 핸드마다 만난 상대 질량으로 정규화.
+   * 쌍 표본의 둘째 찬스는 첫 찬스가 정해 둔 리버를 그대로 딜한다 (가리기·정규화를 쌍 단위로 한 번에 해야
+   * 리버 카드를 쥔 핸드가 턴 단계에서 "살아 있는데 값이 0"으로 세어지지 않는다)
+   */
+  private sampledChance(node: MChance, depth: number, ctx: MCtx, p: number, r: Float32Array[], out: Float32Array, mode: "train" | "avg" | "br"): void {
+    const n = this.n;
+    const sm = this.sample!;
+    if (ctx.next !== undefined) {
+      const c = ctx.next;
+      const child = node.children[c];
+      if (!child) throw new Error("표본 리버를 딜할 수 없습니다");
+      this.traverse(child, depth + 1, this.nextCtx({ ...ctx, next: undefined }, node, c), p, r, out, mode);
+      return;
+    }
+    const items: Array<[number, number]> = sm.pairs ? sm.pairList : sm.first.map((c) => [c, -1]);
+    const tmp = this.buf(depth, 0);
+    const r2: Float32Array[] = [];
+    for (let q = 0; q < this.P; q++) r2.push(this.buf(depth, 1 + q));
+    const M = this.buf(depth, 100);
+    const msum = this.buf(depth, 101);
+    const dead = new Uint8Array(n);
+    out.fill(0);
+    msum.fill(0);
+    for (const [c, c2] of items) {
+      const child = node.children[c];
+      if (!child || ctx.board.includes(c)) continue;
+      for (let q = 0; q < this.P; q++) r2[q].set(r[q]);
+      for (const x of c2 >= 0 ? [c, c2] : [c]) {
+        const hw = this.handsWithCard[x];
+        for (let k = 0; k < hw.length; k++) {
+          dead[hw[k]] = 1;
+          for (let q = 0; q < this.P; q++) r2[q][hw[k]] = 0;
+        }
+      }
+      const ctx2 = this.nextCtx(ctx, node, c);
+      if (c2 >= 0) ctx2.next = c2;
+      this.traverse(child, depth + 1, ctx2, p, r2, tmp, mode);
+      this.massVector(p, r2, M);
+      for (let h = 0; h < n; h++) {
+        if (dead[h]) continue;
+        out[h] += tmp[h];
+        msum[h] += M[h];
+      }
+      dead.fill(0);
+    }
+    this.massVector(p, r, M);
+    for (let h = 0; h < n; h++) out[h] = msum[h] > 0 ? (out[h] * M[h]) / msum[h] : 0;
   }
 
   private activeCountOf(active: boolean[]): number {
@@ -926,6 +1037,7 @@ export class MultiSolver {
       else this.showdownCFV(ctx.board, p, node.active, r, this.rakedPot(node.pot), node.invested[p], out);
       return;
     }
+    if (node.kind === "chance" && this.sample) return this.sampledChance(node, depth, ctx, p, r, out, mode);
     if (node.kind === "chance") {
       out.fill(0);
       const tmp = this.buf(depth, 0);
@@ -956,6 +1068,8 @@ export class MultiSolver {
     }
     const d = node;
     const A = d.actions.length;
+    // 할 수 있는 게 하나뿐(체크만)이면 전략이 늘 1 이라 후회·전략 누적이 필요 없다
+    if (A === 1) return this.traverse(d.children[0], depth + 1, ctx, p, r, out, mode);
     const q = d.player;
     const sigma = this.sigmaBuf(depth, A);
     if (mode === "train") this.regretMatch(this.regret[d.id], this.offset(d, ctx), A, sigma);
@@ -1113,6 +1227,21 @@ export class MultiSolver {
     const out = new Float32Array(n);
     for (let h = 0; h < n; h++) out[h] = den[h] > 0 ? num[h] / den[h] : 0;
     return out;
+  }
+
+  /** 노드에서 행동할 사람의 평균 전략과 액션별 EV (A×n, 지금 폴드를 0으로 둔 값). analyzeDecision 에서 에퀴티 계산을 뺀 것 */
+  actionValues(d: MDecision, ctx: MCtx, reach: Float32Array[]): { strategy: Float32Array; ev: Float32Array } {
+    const n = this.n;
+    const p = d.player;
+    const M = new Float32Array(n);
+    this.massVector(p, reach, M);
+    const tmp = new Float32Array(n);
+    const ev = new Float32Array(d.actions.length * n);
+    for (let a = 0; a < d.actions.length; a++) {
+      this.traverse(d.children[a], 1, ctx, p, reach, tmp, "avg");
+      for (let h = 0; h < n; h++) ev[a * n + h] = M[h] > 0 ? tmp[h] / M[h] + d.invested[p] : 0;
+    }
+    return { strategy: this.avgStrategy(d, ctx), ev };
   }
 
   analyzeDecision(d: MDecision, ctx: MCtx, reach: Float32Array[]): MDecisionAnalysis {

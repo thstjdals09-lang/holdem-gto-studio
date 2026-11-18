@@ -8,9 +8,10 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview --port 4173",
     "test": "vitest run",
-    "decide": "esbuild scripts/decide.ts --bundle --platform=node --format=esm --log-level=warning --outfile=.cache/decide.mjs && node .cache/decide.mjs",
+    "decide": "esbuild scripts/decide.ts --bundle --platform=node --format=esm --log-level=warning --outfile=.cache/decide.mjs && esbuild sdk/src/sub-worker-node.ts --bundle --platform=node --format=esm --log-level=warning --outfile=.cache/gto-sub-worker-node.mjs && node .cache/decide.mjs",
     "sdk:build": "tsc -p sdk && node sdk/build.mjs",
-    "sdk:pack": "npm run sdk:build && cd sdk && npm pack --pack-destination ../release"
+    "sdk:pack": "npm run sdk:build && cd sdk && npm pack --pack-destination ../release",
+    "bench:decide": "esbuild scripts/bench-decide.ts --bundle --platform=node --format=esm --log-level=warning --outfile=.cache/bench-decide.mjs && node .cache/bench-decide.mjs"
   },
   "dependencies": {
     "react": "18.3.1",
